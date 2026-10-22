@@ -176,6 +176,12 @@ export async function postSignalMessage(
         // Dedicated mailbox for primary offer/answer handshake messages
         if (type === "offer" || type === "answer") {
           await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
+        } else if (type === "candidate") {
+          // Store candidates in dedicated list without overwriting offer/answer
+          const existingCands = (await kv.get<SignalMessage[]>(`cands:${code}:${target}`, "json")) || [];
+          existingCands.push(msg);
+          if (existingCands.length > 30) existingCands.splice(0, existingCands.length - 30);
+          await kv.put(`cands:${code}:${target}`, JSON.stringify(existingCands), { expirationTtl: ttl });
         }
       } catch (err) {
         console.warn("KV post message error:", err);
@@ -213,6 +219,19 @@ export async function pollSignalMessages(
         const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
         if (directMsg && directMsg.timestamp > sinceTimestamp) {
           foundMessages.set(directMsg.id, directMsg);
+        }
+      } catch {
+        // ignored
+      }
+
+      try {
+        const directCands = await kv.get<SignalMessage[]>(`cands:${code}:${forRole}`, "json");
+        if (Array.isArray(directCands)) {
+          for (const c of directCands) {
+            if (c && c.timestamp > sinceTimestamp) {
+              foundMessages.set(c.id, c);
+            }
+          }
         }
       } catch {
         // ignored
