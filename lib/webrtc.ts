@@ -19,9 +19,11 @@ export type WebRTCMessage =
   | { type: "transfer-request"; files: TransferManifestFile[] }
   | { type: "transfer-accept" }
   | { type: "transfer-decline"; reason?: string }
-  | { type: "file-start"; id: string; name: string; size: number; mimeType: string }
+  | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number }
   | { type: "file-end"; id: string }
   | { type: "file-ack"; id: string }
+  | { type: "resume-query"; id: string }
+  | { type: "resume-ack"; id: string; receivedBytes: number }
   | { type: "transfer-complete" };
 
 /**
@@ -73,24 +75,27 @@ export async function sendChunkWithBackpressure(
 /**
  * Streams a single File chunk-by-chunk across RTCDataChannel.
  * Slices the file on demand so large payloads never saturate browser RAM.
+ * Supports resuming from a non-zero byte offset if a temporary connection drop occurs.
  */
 export async function streamFileOverDataChannel(
   channel: RTCDataChannel,
   file: File,
   fileId: string,
+  startOffset: number = 0,
   onProgress: (sentBytes: number, totalBytes: number) => void,
   isCancelled: () => boolean,
 ): Promise<void> {
   const total = file.size;
-  let offset = 0;
+  let offset = Math.min(startOffset, total);
 
-  // Signal start of file transmission
+  // Signal start or resume of file transmission with byte offset
   const startMsg: WebRTCMessage = {
     type: "file-start",
     id: fileId,
     name: file.name,
     size: file.size,
     mimeType: file.type || "application/octet-stream",
+    offset,
   };
   channel.send(JSON.stringify(startMsg));
 
@@ -116,6 +121,25 @@ export async function streamFileOverDataChannel(
     id: fileId,
   };
   channel.send(JSON.stringify(endMsg));
+}
+
+/**
+ * Triggers an ICE restart across RTCPeerConnection to silently recover from network drops.
+ */
+export async function triggerIceRestart(
+  pc: RTCPeerConnection,
+  code: string,
+  sender: "sender" | "receiver",
+  target: "sender" | "receiver",
+): Promise<boolean> {
+  try {
+    const offer = await pc.createOffer({ iceRestart: true });
+    await pc.setLocalDescription(offer);
+    return await sendSignalMessage(code, sender, target, "offer", offer);
+  } catch (err) {
+    console.warn("ICE restart initiation failed:", err);
+    return false;
+  }
 }
 
 /**

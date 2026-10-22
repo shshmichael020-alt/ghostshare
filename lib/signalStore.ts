@@ -19,20 +19,27 @@ export interface SignalingSession {
 // In-memory session store (shared per runtime instance / isolate)
 const sessions = new Map<string, SignalingSession>();
 
-const SESSION_TTL_MS = 15 * 60 * 1000; // 15 minutes pairing window
+export const DEFAULT_SESSION_TTL_SECONDS = 3600; // 1 hour default pairing & transfer window
 
-export function createSignalingSession(code: string): SignalingSession {
+export function createSignalingSession(code: string, ttlSeconds: number = DEFAULT_SESSION_TTL_SECONDS): SignalingSession {
   const now = Date.now();
   const session: SignalingSession = {
     code,
     createdAt: now,
-    expiresAt: now + SESSION_TTL_MS,
+    expiresAt: now + ttlSeconds * 1000,
     receiverActive: true,
     senderActive: false,
     messages: [],
   };
   sessions.set(code, session);
   return session;
+}
+
+export function updateSessionTtl(code: string, ttlSeconds: number): boolean {
+  const session = getSignalingSession(code);
+  if (!session) return false;
+  session.expiresAt = session.createdAt + ttlSeconds * 1000;
+  return true;
 }
 
 export function getSignalingSession(code: string): SignalingSession | null {

@@ -12,6 +12,7 @@ import {
   sendSignalMessage,
   fetchSignalMessages,
   streamFileOverDataChannel,
+  triggerIceRestart,
   WebRTCMessage,
 } from "@/lib/webrtc";
 import {
@@ -123,11 +124,15 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         }
       };
 
-      // Handle ICE connection state changes
+      // Handle ICE connection state changes with Auto-Reconnect
       pc.oniceconnectionstatechange = () => {
         if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
           setConnStatus("connected");
           setNatWarning(null);
+        } else if (pc.iceConnectionState === "disconnected") {
+          setConnStatus("connecting");
+          // Silently trigger ICE restart to auto-reconnect without resetting
+          triggerIceRestart(pc, codeToConnect, "sender", "receiver");
         } else if (pc.iceConnectionState === "failed") {
           setConnStatus("disconnected");
           setNatWarning(
@@ -339,6 +344,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             dcRef.current,
             item.file,
             item.id,
+            0,
             (sent, total) => {
               if (!isSubscribed) return;
               const pct = Math.round((sent / total) * 100);

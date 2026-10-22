@@ -8,6 +8,8 @@ import {
   postSignalMessage,
   pollSignalMessages,
   closeSignalingSession,
+  updateSessionTtl,
+  DEFAULT_SESSION_TTL_SECONDS,
 } from "../lib/signalStore";
 import {
   DEFAULT_ICE_SERVERS,
@@ -48,18 +50,36 @@ test("WebRTC Protocol: serializes and parses control messages cleanly", () => {
 
   const declineMsg: WebRTCMessage = { type: "transfer-decline", reason: "Declined by recipient" };
   assert.equal(JSON.parse(JSON.stringify(declineMsg)).reason, "Declined by recipient");
+
+  const resumeQueryMsg: WebRTCMessage = { type: "resume-query", id: "f-1" };
+  assert.equal(JSON.parse(JSON.stringify(resumeQueryMsg)).type, "resume-query");
+
+  const resumeAckMsg: WebRTCMessage = { type: "resume-ack", id: "f-1", receivedBytes: 1048576 };
+  const parsedAck = JSON.parse(JSON.stringify(resumeAckMsg)) as WebRTCMessage;
+  if (parsedAck.type === "resume-ack") {
+    assert.equal(parsedAck.receivedBytes, 1048576);
+  }
 });
 
 test("Signaling Store: session lifecycle, joining, posting, and role-filtered polling", () => {
   const testCode = "99887766";
   closeSignalingSession(testCode);
 
-  // 1. Create session
+  // 1. Create session with 1-hour (3600s) default TTL
   const session = createSignalingSession(testCode);
   assert.equal(session.code, testCode);
+  assert.equal(DEFAULT_SESSION_TTL_SECONDS, 3600, "Default TTL must be 1 hour");
   assert.equal(session.receiverActive, true);
   assert.equal(session.senderActive, false);
-  assert.ok(session.expiresAt > Date.now());
+  const remainingSeconds = Math.round((session.expiresAt - session.createdAt) / 1000);
+  assert.equal(remainingSeconds, 3600, "Initial TTL must be 3600 seconds (1 hour)");
+
+  // 1b. Update session TTL to 2 hours (7200s)
+  const updatedTtl = updateSessionTtl(testCode, 7200);
+  assert.equal(updatedTtl, true);
+  const updatedSession = getSignalingSession(testCode);
+  const updatedRemaining = Math.round((updatedSession!.expiresAt - updatedSession!.createdAt) / 1000);
+  assert.equal(updatedRemaining, 7200, "Updated TTL must be 7200 seconds (2 hours)");
 
   // 2. Fetch active session
   const fetched = getSignalingSession(testCode);

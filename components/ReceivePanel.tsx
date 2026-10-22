@@ -7,6 +7,8 @@ import { FileTypeIcon } from "./FileTypeIcon";
 import ToastStack from "./ToastStack";
 import { useToasts } from "@/lib/useToasts";
 import { formatSize, formatCountdown } from "@/lib/format";
+import { EXPIRY_OPTIONS, DEFAULT_TTL_SECONDS } from "@/lib/constants";
+import { createIncomingFileSink, OpfsFileStreamer, isOpfsSupported } from "@/lib/opfs";
 import {
   createPeerConnection,
   sendSignalMessage,
@@ -31,6 +33,8 @@ import {
   AlertTriangle,
   XCircle,
   Loader2,
+  Clock,
+  HardDrive,
 } from "lucide-react";
 
 export interface ReceivedFileItem {
@@ -38,7 +42,7 @@ export interface ReceivedFileItem {
   name: string;
   size: number;
   downloadUrl: string;
-  blob: Blob;
+  blob: Blob | File;
   receivedAt: number;
 }
 
@@ -48,12 +52,12 @@ interface ReceivePanelProps {
 
 export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const [code, setCode] = useState<string | null>(null);
-  const [connStatus, setConnStatus] = useState<"idle" | "awaiting" | "connecting" | "connected" | "failed">("idle");
+  const [connStatus, setConnStatus] = useState<"idle" | "awaiting" | "connecting" | "connected" | "reconnecting" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
   const [natWarning, setNatWarning] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
-  const [initialTtl, setInitialTtl] = useState<number>(900); // 15 mins default signaling TTL
+  const [initialTtl, setInitialTtl] = useState<number>(DEFAULT_TTL_SECONDS); // 1 hour (3600s) default
   const [copiedLink, setCopiedLink] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
 
@@ -77,8 +81,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSignalTimestamp = useRef<number>(0);
 
-  // In-memory buffer for chunks of current file
-  const currentChunksRef = useRef<ArrayBuffer[]>([]);
+  // Active OPFS/stream sink for zero-RAM direct-to-disk streaming
+  const activeSinkRef = useRef<OpfsFileStreamer | null>(null);
   const currentMetaRef = useRef<{ id: string; name: string; size: number; mimeType: string } | null>(null);
 
   const { toasts, push, dismiss } = useToasts();
@@ -108,16 +112,16 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     };
 
     channel.onclose = () => {
-      setConnStatus("awaiting");
-      push("Peer disconnected", "default");
+      // Don't erase received files! If sender leaves after transfer, files stay in OPFS
+      setConnStatus((prev) => (prev === "connected" ? "awaiting" : prev));
+      push("Peer connection closed (Received files remain ready)", "default");
     };
 
     channel.onerror = (err) => {
       console.error("Data channel error:", err);
-      push("Data channel error encountered", "error");
     };
 
-    channel.onmessage = (event) => {
+    channel.onmessage = async (event) => {
       if (typeof event.data === "string") {
         try {
           const msg = JSON.parse(event.data) as WebRTCMessage;
@@ -126,42 +130,67 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             setPendingApproval({ files: msg.files });
             push(`Sender requested to transfer ${msg.files.length} file(s)`, "default");
           } else if (msg.type === "file-start") {
-            currentChunksRef.current = [];
             currentMetaRef.current = {
               id: msg.id,
               name: msg.name,
               size: msg.size,
               mimeType: msg.mimeType,
             };
+
+            const startOffset = msg.offset ?? 0;
+
+            // Stream directly onto local disk/OPFS
+            activeSinkRef.current = await createIncomingFileSink(
+              code || "default",
+              msg.name,
+              msg.mimeType,
+              startOffset,
+            );
+
             setActiveReceiving({
               id: msg.id,
               name: msg.name,
               size: msg.size,
-              receivedBytes: 0,
+              receivedBytes: startOffset,
             });
           } else if (msg.type === "file-end") {
             const meta = currentMetaRef.current;
-            if (meta) {
-              const blob = new Blob(currentChunksRef.current, { type: meta.mimeType });
-              const downloadUrl = URL.createObjectURL(blob);
+            const sink = activeSinkRef.current;
+
+            if (meta && sink) {
+              const file = await sink.close();
+              const downloadUrl = URL.createObjectURL(file);
               const completedItem: ReceivedFileItem = {
                 id: meta.id,
                 name: meta.name,
-                size: blob.size,
+                size: file.size,
                 downloadUrl,
-                blob,
+                blob: file,
                 receivedAt: Date.now(),
               };
 
-              setReceivedFiles((prev) => [...prev, completedItem]);
+              setReceivedFiles((prev) => {
+                const existing = prev.filter((f) => f.id !== meta.id);
+                return [...existing, completedItem];
+              });
+
               setActiveReceiving(null);
-              currentChunksRef.current = [];
+              activeSinkRef.current = null;
               currentMetaRef.current = null;
 
               // Acknowledge file completion
               channel.send(JSON.stringify({ type: "file-ack", id: meta.id }));
-              push(`Received: ${meta.name}`, "success");
+              push(`Received: ${meta.name} (Disk cached)`, "success");
             }
+          } else if (msg.type === "resume-query") {
+            // Sender asks how many bytes receiver has for this file
+            const bytesWritten = activeSinkRef.current?.getBytesWritten() ?? 0;
+            const ackMsg: WebRTCMessage = {
+              type: "resume-ack",
+              id: msg.id,
+              receivedBytes: bytesWritten,
+            };
+            channel.send(JSON.stringify(ackMsg));
           } else if (msg.type === "transfer-complete") {
             setActiveReceiving(null);
             push("All files transferred successfully!", "success");
@@ -170,21 +199,23 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           console.error("Failed to parse data channel message:", e);
         }
       } else if (event.data instanceof ArrayBuffer) {
-        // Binary chunk received
-        currentChunksRef.current.push(event.data);
-        setActiveReceiving((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            receivedBytes: prev.receivedBytes + event.data.byteLength,
-          };
-        });
+        // Binary chunk received -> stream directly to OPFS disk handle
+        if (activeSinkRef.current) {
+          await activeSinkRef.current.write(event.data);
+          setActiveReceiving((prev) => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              receivedBytes: prev.receivedBytes + event.data.byteLength,
+            };
+          });
+        }
       }
     };
-  }, [push]);
+  }, [code, push]);
 
   // Initialize a new receiving session and peer connection
-  const startSession = useCallback(async () => {
+  const startSession = useCallback(async (selectedTtl: number = initialTtl) => {
     cleanupConnection();
     setError(null);
     setNatWarning(null);
@@ -198,8 +229,13 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     lastSignalTimestamp.current = 0;
 
     try {
-      // 1. Create signaling session
-      const res = await fetch("/api/signal/session", { method: "POST" });
+      // 1. Create signaling session with requested TTL (default 1 hour = 3600s)
+      const res = await fetch("/api/signal/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: selectedTtl }),
+      });
+
       if (!res.ok) {
         const errData = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(errData.error || "Could not start receiving session");
@@ -209,7 +245,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       setCode(currentCode);
       const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
       setRemaining(rem);
-      setInitialTtl(rem || 900);
+      setInitialTtl(rem || selectedTtl);
       setConnStatus("awaiting");
 
       // 2. Initialize RTCPeerConnection
@@ -223,15 +259,18 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         }
       };
 
-      // Monitor connection & ICE health
+      // Monitor connection & ICE health with Auto-Recovery
       pc.oniceconnectionstatechange = () => {
         if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
           setConnStatus("connected");
           setNatWarning(null);
+        } else if (pc.iceConnectionState === "disconnected") {
+          // Network paused, peer connection will attempt silent ICE restart
+          setConnStatus("reconnecting");
         } else if (pc.iceConnectionState === "failed") {
           setConnStatus("failed");
           setNatWarning(
-            "Direct P2P UDP path could not be established. Both devices may be behind symmetric NAT or restrictive corporate firewalls.",
+            "Direct P2P UDP path could not be established. Check if either device is on a restricted firewall.",
           );
         }
       };
@@ -288,7 +327,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       setError((e as Error).message);
       setConnStatus("failed");
     }
-  }, [cleanupConnection, setupDataChannel, push]);
+  }, [cleanupConnection, initialTtl, setupDataChannel, push]);
 
   // Initialize session on mount
   useEffect(() => {
@@ -300,6 +339,24 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       cleanupConnection();
     };
   }, [startSession, cleanupConnection]);
+
+  // Update session TTL dynamically when user picks a different expiration window
+  const updateExpiryWindow = async (newSeconds: number) => {
+    setInitialTtl(newSeconds);
+    setRemaining(newSeconds);
+    if (!code) return;
+
+    try {
+      await fetch(`/api/signal/session/${code}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: newSeconds }),
+      });
+      push(`Session duration updated to ${EXPIRY_OPTIONS.find((o) => o.seconds === newSeconds)?.label}`, "default");
+    } catch {
+      // Ignored
+    }
+  };
 
   // 1-second countdown ticker
   useEffect(() => {
@@ -360,7 +417,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     }
     const acceptMsg: WebRTCMessage = { type: "transfer-accept" };
     dcRef.current.send(JSON.stringify(acceptMsg));
-    push("Transfer accepted. Commencing direct P2P streaming...", "success");
+    push("Transfer accepted. Streaming directly to local storage...", "success");
     setPendingApproval(null);
   }
 
@@ -420,8 +477,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           </div>
           <h1 className="font-display-hero text-on-surface tracking-tight">Receive Files</h1>
           <p className="font-body-md text-on-surface-variant max-w-xl">
-            Ephemeral peer tunnel ready. Data flows directly browser-to-browser via WebRTC SCTP data channels with zero
-            cloud storage and zero transit logs.
+            Ephemeral peer tunnel ready. Data flows directly browser-to-browser via WebRTC SCTP data channels with direct
+            disk streaming and zero cloud storage.
           </p>
         </div>
 
@@ -433,7 +490,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
                   connStatus === "connected"
                     ? "bg-tertiary"
-                    : connStatus === "connecting"
+                    : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
                     : connStatus === "failed"
                     ? "bg-error"
@@ -444,7 +501,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 className={`relative inline-flex rounded-full h-2 w-2 ${
                   connStatus === "connected"
                     ? "bg-tertiary"
-                    : connStatus === "connecting"
+                    : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
                     : connStatus === "failed"
                     ? "bg-error"
@@ -458,6 +515,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   ? "text-tertiary"
                   : connStatus === "connecting"
                   ? "text-primary"
+                  : connStatus === "reconnecting"
+                  ? "text-primary"
                   : connStatus === "failed"
                   ? "text-error"
                   : "text-secondary"
@@ -466,7 +525,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               {connStatus === "connected"
                 ? "P2P Bridge Connected"
                 : connStatus === "connecting"
-                ? "Negotiating DTLS Handshake..."
+                ? "Negotiating Handshake..."
+                : connStatus === "reconnecting"
+                ? "Reconnecting P2P Tunnel..."
                 : connStatus === "failed"
                 ? "Connection Failed"
                 : "Awaiting Sender Connection..."}
@@ -490,7 +551,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         <div className="p-4 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-center justify-between">
           <span className="font-body-sm">{error}</span>
           <button
-            onClick={startSession}
+            onClick={() => startSession(initialTtl)}
             className="px-3 py-1 bg-surface-container-high hover:bg-surface-bright rounded text-xs text-on-surface font-medium transition-colors cursor-pointer"
           >
             Retry
@@ -559,7 +620,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             </p>
           </div>
           <button
-            onClick={startSession}
+            onClick={() => startSession(initialTtl)}
             className="mt-2 flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary text-on-primary hover:bg-primary-container hover:text-on-primary-container font-body-sm font-medium transition-all shadow-md active:scale-95 cursor-pointer"
           >
             <RefreshCw size={16} />
@@ -568,111 +629,141 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         </div>
       ) : receivedFiles.length === 0 && !activeReceiving ? (
         /* STAGE A: Waiting for files / Pairing Hub */
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-          {/* Left Hero: Monospace Pairing Code Card */}
-          <div className="lg:col-span-7 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col justify-between border border-white/[0.08] shadow-xl relative overflow-hidden">
-            <div className="absolute -right-16 -top-16 w-48 h-48 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="flex flex-col gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+            {/* Left Hero: Monospace Pairing Code Card */}
+            <div className="lg:col-span-7 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col justify-between border border-white/[0.08] shadow-xl relative overflow-hidden">
+              <div className="absolute -right-16 -top-16 w-48 h-48 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
 
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Key size={18} className="text-secondary" />
-                  <span className="font-label-caps text-on-surface-variant uppercase">
-                    Ephemeral 8-Digit Pairing Token
-                  </span>
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Key size={18} className="text-secondary" />
+                    <span className="font-label-caps text-on-surface-variant uppercase">
+                      Ephemeral 8-Digit Pairing Token
+                    </span>
+                  </div>
+
+                  {/* Countdown pill with dynamic ring */}
+                  <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-highest border border-white/[0.06] shadow-sm">
+                    <svg className="w-3.5 h-3.5 -rotate-90" viewBox="0 0 24 24">
+                      <circle
+                        className="text-surface-container"
+                        cx="12"
+                        cy="12"
+                        fill="none"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                      />
+                      <circle
+                        className="text-tertiary transition-all duration-1000"
+                        cx="12"
+                        cy="12"
+                        fill="none"
+                        r="9"
+                        stroke="currentColor"
+                        strokeDasharray="56.5"
+                        strokeDashoffset={strokeDashoffset}
+                        strokeWidth="2.5"
+                      />
+                    </svg>
+                    <span className="font-mono-telemetry text-on-surface font-semibold tracking-wider">
+                      {remaining !== null ? `Expires in ${formatCountdown(remaining)}` : "Generating..."}
+                    </span>
+                  </div>
                 </div>
 
-                {/* Countdown pill with dynamic ring */}
-                <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-highest border border-white/[0.06] shadow-sm">
-                  <svg className="w-3.5 h-3.5 -rotate-90" viewBox="0 0 24 24">
-                    <circle
-                      className="text-surface-container"
-                      cx="12"
-                      cy="12"
-                      fill="none"
-                      r="9"
-                      stroke="currentColor"
-                      strokeWidth="2.5"
-                    />
-                    <circle
-                      className="text-tertiary transition-all duration-1000"
-                      cx="12"
-                      cy="12"
-                      fill="none"
-                      r="9"
-                      stroke="currentColor"
-                      strokeDasharray="56.5"
-                      strokeDashoffset={strokeDashoffset}
-                      strokeWidth="2.5"
-                    />
-                  </svg>
-                  <span className="font-mono-telemetry text-on-surface font-semibold tracking-wider">
-                    {remaining !== null ? `Expires in ${formatCountdown(remaining)}` : "Generating..."}
+                {/* Segmented Pin Display Component */}
+                <PinDisplay code={code} onCopy={() => push("Pairing code copied to clipboard", "default")} />
+
+                <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-white/[0.04]">
+                  <span className="font-mono-telemetry">TRANSPORT: WebRTC DataChannel (SCTP)</span>
+                  <span className="font-mono-telemetry text-tertiary">
+                    {isOpfsSupported() ? "OPFS DISK STREAMING" : "BLOB RAM CACHE"}
                   </span>
                 </div>
               </div>
 
-              {/* Segmented Pin Display Component */}
-              <PinDisplay code={code} onCopy={() => push("Pairing code copied to clipboard", "default")} />
-
-              <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-white/[0.04]">
-                <span className="font-mono-telemetry">TRANSPORT: WebRTC DataChannel (SCTP)</span>
-                <span className="font-mono-telemetry text-tertiary">DTLS 1.3 ENCRYPTED</span>
+              <div className="mt-6 pt-4 flex items-center gap-2 text-on-surface-variant border-t border-white/[0.06]">
+                <Info size={16} className="text-secondary shrink-0" />
+                <p className="font-body-sm">
+                  Enter this temporary code into GhostShare on the sending device or scan the QR code to pair.
+                </p>
               </div>
             </div>
 
-            <div className="mt-6 pt-4 flex items-center gap-2 text-on-surface-variant border-t border-white/[0.06]">
-              <Info size={16} className="text-secondary shrink-0" />
-              <p className="font-body-sm">
-                Enter this temporary code into GhostShare on the sending device or scan the QR code to pair.
-              </p>
+            {/* Right Hero: High-Precision QR Code Card */}
+            <div className="lg:col-span-5 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col items-center justify-between border border-white/[0.08] shadow-xl">
+              <div className="w-full flex items-center justify-between">
+                <span className="font-label-caps text-on-surface-variant flex items-center gap-1.5 uppercase">
+                  <QrCode size={16} className="text-secondary" />
+                  Direct Device Link
+                </span>
+                <span className="font-mono-telemetry text-outline bg-surface-container px-2 py-0.5 rounded">
+                  AUTO-SYNC
+                </span>
+              </div>
+
+              {/* QR Canvas Container with strict high-contrast compliance */}
+              <div className="my-5 p-4 bg-white rounded-2xl shadow-2xl flex flex-col items-center justify-center transition-transform hover:scale-[1.02]">
+                {code ? (
+                  <QRCodeSVG
+                    value={qrValue}
+                    size={190}
+                    level="M"
+                    bgColor="#ffffff"
+                    fgColor="#0c0e12"
+                    className="rounded"
+                  />
+                ) : (
+                  <div className="w-[190px] h-[190px] bg-neutral-200 animate-pulse rounded" />
+                )}
+              </div>
+
+              {/* Link & Share Actions */}
+              <div className="w-full flex items-center justify-center gap-2">
+                <button
+                  onClick={copyLink}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
+                >
+                  {copiedLink ? <Check size={14} className="text-tertiary" /> : <Copy size={14} />}
+                  <span>{copiedLink ? "Link Copied" : "Copy Link"}</span>
+                </button>
+                <button
+                  onClick={shareLink}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
+                >
+                  <Share2 size={14} />
+                  <span>Share URL</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Right Hero: High-Precision QR Code Card */}
-          <div className="lg:col-span-5 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col items-center justify-between border border-white/[0.08] shadow-xl">
-            <div className="w-full flex items-center justify-between">
-              <span className="font-label-caps text-on-surface-variant flex items-center gap-1.5 uppercase">
-                <QrCode size={16} className="text-secondary" />
-                Direct Device Link
-              </span>
-              <span className="font-mono-telemetry text-outline bg-surface-container px-2 py-0.5 rounded">
-                AUTO-SYNC
+          {/* User Expiry Configuration Bar (Default 1 Hour) */}
+          <div className="p-4 rounded-xl bg-surface-container-low border border-white/[0.06] flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Clock size={16} className="text-secondary" />
+              <span className="font-body-sm text-on-surface font-medium">Session Expiration Window:</span>
+              <span className="font-mono-telemetry text-tertiary text-xs">
+                (Default: 1 Hour • Adjustable)
               </span>
             </div>
-
-            {/* QR Canvas Container with strict high-contrast compliance */}
-            <div className="my-5 p-4 bg-white rounded-2xl shadow-2xl flex flex-col items-center justify-center transition-transform hover:scale-[1.02]">
-              {code ? (
-                <QRCodeSVG
-                  value={qrValue}
-                  size={190}
-                  level="M"
-                  bgColor="#ffffff"
-                  fgColor="#0c0e12"
-                  className="rounded"
-                />
-              ) : (
-                <div className="w-[190px] h-[190px] bg-neutral-200 animate-pulse rounded" />
-              )}
-            </div>
-
-            {/* Link & Share Actions */}
-            <div className="w-full flex items-center justify-center gap-2">
-              <button
-                onClick={copyLink}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
-              >
-                {copiedLink ? <Check size={14} className="text-tertiary" /> : <Copy size={14} />}
-                <span>{copiedLink ? "Link Copied" : "Copy Link"}</span>
-              </button>
-              <button
-                onClick={shareLink}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
-              >
-                <Share2 size={14} />
-                <span>Share URL</span>
-              </button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {EXPIRY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.seconds}
+                  onClick={() => updateExpiryWindow(opt.seconds)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-mono-telemetry transition-all cursor-pointer ${
+                    initialTtl === opt.seconds
+                      ? "bg-secondary text-on-secondary font-bold shadow-sm"
+                      : "bg-surface-container hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </div>
         </div>
@@ -691,7 +782,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                     Received Manifest ({receivedFiles.length} File{receivedFiles.length > 1 ? "s" : ""} Ready)
                   </h2>
                   <p className="font-body-sm text-on-surface-variant">
-                    Direct WebRTC SCTP data stream • Zero Cloud Storage • Raw binary fidelity
+                    Direct WebRTC SCTP stream • Streamed directly onto local disk via OPFS
                   </p>
                 </div>
               </div>
@@ -704,7 +795,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 <div className="text-right">
                   <span className="font-mono-telemetry text-on-surface-variant block uppercase">Tunnel State</span>
                   <span className="font-mono-data text-on-surface font-medium">
-                    {connStatus === "connected" ? "P2P Active" : "Session Paused"}
+                    {connStatus === "connected" ? "P2P Active" : "Sender Detached (Files Retained)"}
                   </span>
                 </div>
                 <button
@@ -725,7 +816,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   <div className="flex items-center gap-2">
                     <Loader2 size={16} className="animate-spin text-secondary" />
                     <span className="font-body-md text-on-surface font-medium truncate max-w-sm">
-                      Receiving: {activeReceiving.name}
+                      Writing to Disk: {activeReceiving.name}
                     </span>
                   </div>
                   <span className="font-mono-telemetry text-secondary text-xs">
@@ -751,16 +842,18 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 <span className="font-mono-telemetry text-on-surface">WebRTC / SCTP</span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Encryption</span>
-                <span className="font-mono-telemetry text-on-surface">DTLS-SRTP / GCM</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Disk Cache</span>
+                <span className="font-mono-telemetry text-tertiary">OPFS (NVMe Writable)</span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
                 <span className="font-label-caps text-on-surface-variant uppercase block">NAT Traversal</span>
-                <span className="font-mono-telemetry text-tertiary">STUN / Direct UDP</span>
+                <span className="font-mono-telemetry text-on-surface">STUN / Auto-Restart</span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Cloud Storage</span>
-                <span className="font-mono-telemetry text-secondary">0 Bytes (Pure P2P)</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Retention Window</span>
+                <span className="font-mono-telemetry text-secondary">
+                  {remaining !== null ? `${formatCountdown(remaining)} remaining` : "1 Hour Default"}
+                </span>
               </div>
             </div>
           </div>
@@ -774,7 +867,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   {receivedFiles.length} Item{receivedFiles.length > 1 ? "s" : ""}
                 </span>
               </div>
-              <span className="font-mono-telemetry text-on-surface-variant">Device RAM Blob Cache</span>
+              <span className="font-mono-telemetry text-tertiary flex items-center gap-1">
+                <HardDrive size={13} /> Staged in Local Sandbox
+              </span>
             </div>
 
             <div className="flex flex-col gap-2.5">
@@ -800,7 +895,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2 font-mono-telemetry text-on-surface-variant">
-                        <span>Delivery: Direct P2P Channel</span>
+                        <span>Cached on Receiver Disk • Accessible Even If Sender Disconnects</span>
                       </div>
                     </div>
                   </div>
@@ -826,7 +921,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-white/[0.04] text-on-surface-variant font-body-sm">
         <div className="flex items-center gap-2">
           <ShieldCheck size={16} className="text-secondary" />
-          <span>Direct P2P DataChannels · Zero server storage · Raw binary fidelity</span>
+          <span>Direct P2P DataChannels · OPFS Disk Streaming · 1-Hour Default TTL</span>
         </div>
         {onOpenSecurity && (
           <button

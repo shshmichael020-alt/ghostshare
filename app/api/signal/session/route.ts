@@ -14,8 +14,18 @@ export async function POST(request: Request) {
       );
     }
 
+    let ttlSeconds = 3600; // 1 hour default
+    try {
+      const body = (await request.json()) as { ttlSeconds?: number };
+      if (body && typeof body.ttlSeconds === "number" && body.ttlSeconds > 0) {
+        ttlSeconds = body.ttlSeconds;
+      }
+    } catch {
+      // Body empty or not JSON, use default 3600
+    }
+
     const code = await generateUniqueCode();
-    const session = createSignalingSession(code);
+    const session = createSignalingSession(code, ttlSeconds);
 
     return NextResponse.json({
       code: session.code,
