@@ -1,7 +1,16 @@
 import { NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { pollSignalMessages } from "@/lib/signalStore";
 
 export async function GET(request: Request) {
+  try {
+    const ctx = getCloudflareContext();
+    const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+    if (kv) {
+      (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
+    }
+  } catch {}
+
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const role = searchParams.get("role") as "receiver" | "sender" | null;

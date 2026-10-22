@@ -1,8 +1,17 @@
 import { NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getSignalingSession, joinSignalingSession, updateSessionTtl } from "@/lib/signalStore";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  try {
+    const ctx = getCloudflareContext();
+    const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+    if (kv) {
+      (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
+    }
+  } catch {}
+
   const { code } = await params;
 
   if (!code || !/^\d{8}$/.test(code)) {
@@ -18,18 +27,41 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     );
   }
 
-  const session = await getSignalingSession(code);
+  let session = await getSignalingSession(code);
   if (!session) {
-    return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
+    // Brief retry in case of edge cross-PoP propagation latency
+    await new Promise((r) => setTimeout(r, 400));
+    session = await getSignalingSession(code);
   }
 
-  return NextResponse.json({
-    code: session.code,
-    expiresAt: session.expiresAt,
-    remainingSeconds: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),
-    receiverActive: session.receiverActive,
-    senderActive: session.senderActive,
-  });
+  if (!session) {
+    return NextResponse.json(
+      { error: "Pairing code not found or expired" },
+      {
+        status: 404,
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "CDN-Cache-Control": "no-store",
+        },
+      },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      code: session.code,
+      expiresAt: session.expiresAt,
+      remainingSeconds: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),
+      receiverActive: session.receiverActive,
+      senderActive: session.senderActive,
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "CDN-Cache-Control": "no-store",
+      },
+    },
+  );
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ code: string }> }) {

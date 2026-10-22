@@ -1,8 +1,17 @@
 import { NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { postSignalMessage } from "@/lib/signalStore";
 
 export async function POST(request: Request) {
   try {
+    try {
+      const ctx = getCloudflareContext();
+      const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+      if (kv) {
+        (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
+      }
+    } catch {}
+
     const { code, sender, target, type, data } = (await request.json()) as {
       code?: string;
       sender?: "receiver" | "sender";

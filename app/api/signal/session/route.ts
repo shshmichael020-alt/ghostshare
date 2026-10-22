@@ -1,10 +1,19 @@
 import { NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateUniqueCode } from "@/lib/codes";
 import { createSignalingSession } from "@/lib/signalStore";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export async function POST(request: Request) {
   try {
+    try {
+      const ctx = getCloudflareContext();
+      const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+      if (kv) {
+        (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
+      }
+    } catch {}
+
     const ip = getClientIp(request);
     const rl = checkRateLimit("session_create", ip, 80, 60_000);
     if (!rl.success) {

@@ -111,9 +111,23 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     isConnectingRef.current = true;
 
     try {
-      // 1. Verify session exists
-      const checkRes = await fetch(`/api/signal/session/${codeToConnect}`, { cache: "no-store" });
-      if (!checkRes.ok) {
+      // 1. Verify session exists (retries up to 3 times to absorb edge KV propagation latency)
+      let sessionFound = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const checkRes = await fetch(`/api/signal/session/${codeToConnect}`, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
+        if (checkRes.ok) {
+          sessionFound = true;
+          break;
+        }
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      }
+
+      if (!sessionFound) {
         setCodeError("That 8-digit code is invalid, non-existent, or expired.");
         setChecking(false);
         isConnectingRef.current = false;

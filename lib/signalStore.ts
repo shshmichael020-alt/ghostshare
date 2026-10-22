@@ -21,15 +21,45 @@ export interface SignalingSession {
 // In-memory fallback and L1 cache
 const localSessions = new Map<string, SignalingSession>();
 
+declare global {
+  var __SESSIONS_KV__: KVNamespace | undefined;
+}
+
 export const DEFAULT_SESSION_TTL_SECONDS = 3600; // 1 hour default pairing window
 
-function getKvBinding(): KVNamespace | null {
-  try {
-    const ctx = getCloudflareContext();
-    return (ctx?.env as { SESSIONS_KV?: KVNamespace })?.SESSIONS_KV ?? null;
-  } catch {
-    return null;
+export async function getKvBinding(): Promise<KVNamespace | null> {
+  if (globalThis.__SESSIONS_KV__) {
+    return globalThis.__SESSIONS_KV__;
   }
+
+  try {
+    const ctx = await getCloudflareContext({ async: true });
+    const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+    if (kv) {
+      globalThis.__SESSIONS_KV__ = kv;
+      return kv;
+    }
+  } catch {}
+
+  try {
+    const ctxSync = getCloudflareContext();
+    const kv = (ctxSync?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
+    if (kv) {
+      globalThis.__SESSIONS_KV__ = kv;
+      return kv;
+    }
+  } catch {}
+
+  const g = globalThis as unknown as Record<string, unknown>;
+  const globalKv = (g.SESSIONS_KV || (g.__env__ as Record<string, unknown> | undefined)?.SESSIONS_KV) as
+    | KVNamespace
+    | undefined;
+  if (globalKv) {
+    globalThis.__SESSIONS_KV__ = globalKv;
+    return globalKv;
+  }
+
+  return null;
 }
 
 export async function createSignalingSession(
@@ -48,7 +78,7 @@ export async function createSignalingSession(
 
   localSessions.set(code, session);
 
-  const kv = getKvBinding();
+  const kv = await getKvBinding();
   if (kv) {
     try {
       await kv.put(`session:${code}`, JSON.stringify(session), {
@@ -63,7 +93,7 @@ export async function createSignalingSession(
 }
 
 export async function getSignalingSession(code: string): Promise<SignalingSession | null> {
-  const kv = getKvBinding();
+  const kv = await getKvBinding();
   if (kv) {
     try {
       const data = await kv.get<SignalingSession>(`session:${code}`, "json");
@@ -98,7 +128,7 @@ export async function joinSignalingSession(code: string): Promise<boolean> {
   session.senderActive = true;
   localSessions.set(code, session);
 
-  const kv = getKvBinding();
+  const kv = await getKvBinding();
   if (kv) {
     try {
       const ttl = Math.max(60, Math.round((session.expiresAt - Date.now()) / 1000));
@@ -118,7 +148,7 @@ export async function updateSessionTtl(code: string, ttlSeconds: number): Promis
   session.expiresAt = session.createdAt + ttlSeconds * 1000;
   localSessions.set(code, session);
 
-  const kv = getKvBinding();
+  const kv = await getKvBinding();
   if (kv) {
     try {
       await kv.put(`session:${code}`, JSON.stringify(session), {
@@ -164,7 +194,7 @@ export async function postSignalMessage(
 
     localSessions.set(code, session);
 
-    const kv = getKvBinding();
+    const kv = await getKvBinding();
     if (kv) {
       try {
         const remainingSec =
@@ -213,7 +243,7 @@ export async function pollSignalMessages(
     }
 
     // Also check target role's dedicated mailbox in KV
-    const kv = getKvBinding();
+    const kv = await getKvBinding();
     if (kv) {
       try {
         const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
@@ -247,7 +277,7 @@ export async function pollSignalMessages(
 
 export async function closeSignalingSession(code: string): Promise<void> {
   localSessions.delete(code);
-  const kv = getKvBinding();
+  const kv = await getKvBinding();
   if (kv) {
     try {
       await kv.delete(`session:${code}`);
