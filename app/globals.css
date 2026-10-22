@@ -78,7 +78,7 @@ body {
   min-height: 100vh;
 }
 
-/* Typography styles matching Stitch Design System */
+/* Typography styles matching Frontend Design System */
 .font-display-hero {
   font-family: var(--font-sans);
   font-size: clamp(2rem, 5vw, 3rem);

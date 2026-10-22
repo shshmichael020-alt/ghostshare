@@ -17,7 +17,7 @@ One device opens GhostShare in Receive mode, generating a cryptographically secu
 - **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto API CSPRNG rejection sampling with automated self-destruction after 15 minutes.
 - **Multi-File Staging & Drag-and-Drop**: Supports folder drag-and-drop, native file selection, and clipboard paste (`Ctrl+V` / `⌘+V`) for screenshots and files.
 - **NAT Traversal with Public STUN**: Uses Google and Cloudflare public STUN servers for direct UDP hole punching across standard residential and mobile networks.
-- **Approved Stitch Design System**: Dark futuristic aesthetic, JetBrains Mono telemetry typography, live status badges, dynamic countdown timers, and responsive layout.
+- **Custom Frontend Design System**: Dark futuristic aesthetic, JetBrains Mono telemetry typography, live status badges, dynamic countdown timers, and responsive layout.
 
 ---
 

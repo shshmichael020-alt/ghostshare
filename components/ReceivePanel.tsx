@@ -86,6 +86,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
   // Active OPFS/stream sink for zero-RAM direct-to-disk streaming
   const activeSinkRef = useRef<OpfsFileStreamer | null>(null);
+  const pendingChunksRef = useRef<ArrayBuffer[]>([]);
   const currentMetaRef = useRef<{ id: string; name: string; size: number; mimeType: string } | null>(null);
 
   const { toasts, push, dismiss } = useToasts();
@@ -94,6 +95,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const cleanupConnection = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     if (tickRef.current) clearInterval(tickRef.current);
+    pendingChunksRef.current = [];
     if (dcRef.current) {
       dcRef.current.close();
       dcRef.current = null;
@@ -142,21 +144,34 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             };
 
             const startOffset = msg.offset ?? 0;
+            pendingChunksRef.current = [];
 
             // Stream directly onto local disk/OPFS
-            activeSinkRef.current = await createIncomingFileSink(
+            const sink = await createIncomingFileSink(
               codeRef.current || "default",
               msg.name,
               msg.mimeType,
               startOffset,
             );
+            activeSinkRef.current = sink;
+
+            // Drain any chunks that arrived while the sink handle was opening
+            if (pendingChunksRef.current.length > 0) {
+              for (const earlyChunk of pendingChunksRef.current) {
+                await sink.write(earlyChunk);
+              }
+              pendingChunksRef.current = [];
+            }
 
             setActiveReceiving({
               id: msg.id,
               name: msg.name,
               size: msg.size,
-              receivedBytes: startOffset,
+              receivedBytes: sink.getBytesWritten(),
             });
+
+            // Signal sender that sink is ready from byte 0
+            channel.send(JSON.stringify({ type: "file-ready", id: msg.id }));
           } else if (msg.type === "file-end") {
             const meta = currentMetaRef.current;
             const sink = activeSinkRef.current;
@@ -220,6 +235,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               receivedBytes: prev.receivedBytes + buffer.byteLength,
             };
           });
+        } else {
+          // Pre-buffer any chunk that arrives before sink handle resolves
+          pendingChunksRef.current.push(buffer);
         }
       }
     };

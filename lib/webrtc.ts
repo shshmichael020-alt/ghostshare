@@ -59,6 +59,7 @@ export type WebRTCMessage =
   | { type: "transfer-accept" }
   | { type: "transfer-decline"; reason?: string }
   | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number }
+  | { type: "file-ready"; id: string }
   | { type: "file-end"; id: string }
   | { type: "file-ack"; id: string }
   | { type: "resume-query"; id: string }
@@ -144,6 +145,31 @@ export async function streamFileOverDataChannel(
   };
   channel.send(JSON.stringify(startMsg));
 
+  // Wait for receiver to allocate file sink/handle before sending binary chunks
+  await new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onReady = (e: MessageEvent) => {
+      if (typeof e.data === "string") {
+        try {
+          const m = JSON.parse(e.data);
+          if (m.type === "file-ready" && m.id === fileId) {
+            cleanup();
+            resolve();
+          }
+        } catch {}
+      }
+    };
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      channel.removeEventListener("message", onReady);
+    };
+    channel.addEventListener("message", onReady);
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, 1500);
+  });
+
   // Stream slices
   while (offset < total) {
     if (isCancelled()) {
@@ -166,6 +192,31 @@ export async function streamFileOverDataChannel(
     id: fileId,
   };
   channel.send(JSON.stringify(endMsg));
+
+  // Wait for receiver to flush all chunks to disk and close stream
+  await new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onAck = (e: MessageEvent) => {
+      if (typeof e.data === "string") {
+        try {
+          const m = JSON.parse(e.data);
+          if (m.type === "file-ack" && m.id === fileId) {
+            cleanup();
+            resolve();
+          }
+        } catch {}
+      }
+    };
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      channel.removeEventListener("message", onAck);
+    };
+    channel.addEventListener("message", onAck);
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, 3000);
+  });
 }
 
 /**

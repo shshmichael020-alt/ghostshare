@@ -14,7 +14,7 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     ".open-next/**",
     ".wrangler/**",
-    "stitch_ghostshare_ui_ux_design_system/**",
+    "frontend_design_system/**",
   ]),
 ]);
 

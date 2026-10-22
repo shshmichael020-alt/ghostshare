@@ -74,7 +74,8 @@ export async function createIncomingFileSink(
             // Await all queued chunk writes before closing the stream
             await writeChain;
             await writable.close();
-            return await fileHandle.getFile();
+            const rawFile = await fileHandle.getFile();
+            return new File([rawFile], fileName, { type: mimeType || "application/octet-stream" });
           },
           getBytesWritten: () => bytesWritten,
         };
