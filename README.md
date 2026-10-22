@@ -11,14 +11,17 @@ One device opens GhostShare in Receive mode, generating a cryptographically secu
 ## 🌟 Key Features
 
 - **Zero Cloud File Storage**: No Backblaze B2, Cloudflare R2, AWS S3, or third-party buckets. File contents never touch any central server or disk.
-- **Direct WebRTC SCTP Data Channels**: Files stream as raw binary chunks (32 KB MTU) with end-to-end DTLS 1.3 encryption.
-- **OPFS Zero-RAM Disk Streaming**: Direct-to-disk streaming via the Origin Private File System (OPFS) enables gigabyte-sized transfers without saturating browser memory.
-- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM saturation on large transfers.
-- **Explicit Receiver Approval**: Receiver must explicitly authorize the file transfer request before any file bytes begin transmitting.
-- **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto API CSPRNG rejection sampling with automated self-destruction after 1 hour (default, configurable from 15m to 4h).
+- **Direct WebRTC SCTP Data Channels**: Files stream as raw binary chunks (32 KB MTU) with end-to-end DTLS encryption negotiated directly between browser peers.
+- **OPFS Direct-to-Disk Streaming**: Direct-to-disk streaming via the browser's native Origin Private File System (OPFS) enables large multi-gigabyte transfers without accumulating in browser memory (RAM).
+- **Collision-Proof File Identity & Verification**: Every incoming transfer is written to a unique sandboxed key (`${fileId}.bin`) with byte-length verification before completion acknowledgement is issued.
+- **Bounded In-Memory Fallback**: For older browsers without OPFS, non-disk transfers are strictly bounded to a 100 MB memory safety ceiling to avoid browser tab crashes.
+- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM and SCTP buffer saturation.
+- **Explicit Receiver Approval**: Receiver must explicitly authorize the file transfer manifest before any binary file bytes begin transmitting.
+- **Strongly Consistent Ephemeral Signaling**: Authoritative per-session SQLite-backed Cloudflare Durable Objects guarantee immediate global consistency across all edge locations with zero replication latency.
+- **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto CSPRNG rejection sampling with automated self-destruction after 1 hour (default, configurable from 30 min to 24 hours).
+- **Receiver Session Management Capability**: Sensitive operations (TTL extension, session termination) require an unexposed CSPRNG `receiverToken` capability issued exclusively to the receiver upon session creation.
 - **Multi-File Staging & Drag-and-Drop**: Supports folder drag-and-drop, native file selection, and clipboard paste (`Ctrl+V` / `⌘+V`) for screenshots and files.
 - **NAT Traversal with Public STUN**: Uses Google and Cloudflare public STUN servers for direct UDP hole punching across residential and mobile networks.
-- **Cloudflare Workers KV Signaling**: Lightning-fast cross-edge signaling coordination with dedicated mailboxes to prevent message collisions.
 - **Custom Frontend Design System**: Dark futuristic aesthetic, JetBrains Mono telemetry typography, live status badges, dynamic countdown timers, and responsive layout.
 
 ---
@@ -35,37 +38,45 @@ One device opens GhostShare in Receive mode, generating a cryptographically secu
 │  - Backpressure flow control    │                 │  - Explicit Accept / Decline    │
 └──────────────┬──────────────────┘                 └────────────────┬────────────────┘
                │                                                     │
-               │         1. Ephemeral Signaling (SDP & ICE)          │
+               │         1. Strongly Consistent Ephemeral Signaling  │
                ├───────────────────► Next.js API ◄───────────────────┤
                │                  (/api/signal/*)                    │
+               │                         │                           │
+               │                         ▼                           │
+               │               Cloudflare Durable Object             │
+               │               (SQLite In-Memory State)              │
                │                                                     │
                │        2. Public STUN NAT Traversal (UDP)           │
                ├───────────────────► Google / CF ◄───────────────────┤
                │                                                     │
-               │                                                     │
                │        3. Direct WebRTC P2P DataChannel             │
-               │         (DTLS 1.3 Encrypted SCTP Chunks)            │
+               │         (DTLS Encrypted SCTP Chunks)                │
                ▼═════════════════════════════════════════════════════▼
-                               Direct Byte Stream
-                            (Zero Cloud Storage)
+                                Direct Byte Stream
+                               (Zero Cloud Storage)
 ```
 
-### 1. Signaling
-The signaling server (`/api/signal/*`) coordinates connection establishment by exchanging:
-- Session descriptions (SDP offers and answers).
-- Interactive Connectivity Establishment (ICE) candidate IP/port pairs.
-- Session leave/disconnect signals.
-
-Signaling sessions self-destruct after 1 hour (configurable up to 4 hours). **File payloads never touch the signaling server.**
+### 1. Authoritative Signaling & Consistency
+The signaling service (`/api/signal/*`) routes each 8-digit pairing code to a dedicated **Cloudflare Durable Object**.
+- **Global Strong Consistency**: Because every request for a given pairing code connects to the exact same Durable Object instance, devices on different networks or PoPs immediately see created sessions and signaling handshakes without cross-datacenter replication delay.
+- **Atomic Queue**: Session descriptions (SDP offers/answers) and batched ICE candidates are persisted atomically without race conditions or key write throttling.
+- **Fail-Closed Operations**: All session creation and signaling submission requests fail closed with explicit HTTP errors if storage persistence cannot be confirmed.
+- **Capability-Based Expiry Control**: Only the original session creator possessing the `receiverToken` can extend the session TTL or delete the session.
 
 ### 2. NAT Traversal & Connectivity
-- **Public STUN**: Enables peers behind residential NATs to discover their reflexive public endpoints and establish direct UDP connections.
-- **Symmetric NAT / Strict Firewalls**: In certain corporate or double-NAT environments where direct UDP hole-punching is blocked, WebRTC connection state will report diagnostics. An optional TURN relay can be configured via environment variables if desired.
+- **Public STUN**: Enables peers behind residential or cellular NATs to discover reflexive public transport addresses and establish direct UDP connections.
+- **Pre-Gathered ICE**: WebRTC offers and answers wait up to 2.2 seconds for initial STUN gathering to embed reflexive addresses directly in the initial SDP payload.
+- **Diagnostics**: If strict corporate firewalls or symmetric NATs block UDP hole punching, the connection lifecycle reports explicit diagnostics.
 
-### 3. Backpressure & Chunking
-Sending large files over `RTCDataChannel` without backpressure crashes browser buffers (`OperationError`). GhostShare solves this:
-- Files are sliced on-demand in **32 KB** slices using `File.slice(offset, end).arrayBuffer()`.
+### 3. Transfer Capacity & Quota Constraints
+- **Zero Cloud Storage Limit**: Files never touch server storage or cloud buckets (`MAX_TRANSFER_BYTES = Infinity`).
+- **Disk & Storage Quotas**: Maximum file size is governed solely by the receiving browser's disk space and browser-allocated OPFS storage quota (typically up to 60-80% of free local disk space on modern desktop and mobile browsers).
+- **RAM Bounded Fallback**: Browsers without OPFS support fall back to an in-memory buffer strictly capped at 100 MB to prevent tab memory exhaustion.
+
+### 4. Backpressure & Chunking
+- Files are sliced on-demand in **32 KB** binary slices via `File.slice()`.
 - If `channel.bufferedAmount > 256 KB`, transmission pauses until the `bufferedamountlow` event fires.
+- The sender requires explicit `file-ready` confirmation before transmitting chunks and explicit `file-ack` verification from the receiver before marking any transfer complete.
 
 ---
 
@@ -81,7 +92,6 @@ npm install
 ```
 
 ### 2. Run the Test Suite
-Verify pairing token generation, signaling store, WebRTC protocol serialization, rate limiting, and formatters:
 ```bash
 npm run test
 ```
@@ -92,19 +102,9 @@ npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-To test peer-to-peer file transfer:
-1. Open [http://localhost:3000](http://localhost:3000) in **Browser Window A** (Receive mode). Note the 8-digit code.
-2. Open [http://localhost:3000](http://localhost:3000) in **Browser Window B** (or an Incognito window / another device on your network).
-3. Switch to **Send** mode, enter the 8-digit code, and click **Connect Recipient**.
-4. Stage files (drag-and-drop or disk select) and click **Begin Direct Transfer**.
-5. Switch to **Browser Window A**, click **Accept & Stream Files**.
-6. Watch real-time progress bars update as binary chunks stream across the WebRTC data channel!
-
 ---
 
 ## 🧪 Verification & Quality Checks
-
-Run the complete suite of quality checks:
 
 ```bash
 # Type check TypeScript code
@@ -116,8 +116,11 @@ npm run test
 # Run ESLint
 npm run lint
 
-# Build production bundle
+# Build production Next.js bundle
 npm run build
+
+# Build OpenNext Cloudflare bundle
+npm run cf:build
 ```
 
 ---
@@ -131,7 +134,7 @@ GhostShare is deployed on **Cloudflare Workers (100% Free Plan)** using OpenNext
 - **Zero cloud storage buckets** (no R2, B2, or S3 needed).
 - **Zero payment cards** or billing accounts required.
 - **Zero file bandwidth costs** incurred by the server during peer transfers.
-- **Workers KV** (`SESSIONS_KV`) coordinates signaling mailboxes globally across Cloudflare edge PoPs.
+- **SQLite Durable Objects** provide strongly consistent global session coordination.
 
 To deploy updates to Cloudflare Workers:
 ```bash
@@ -142,8 +145,8 @@ npm run deploy
 
 ## 🔒 Security Summary
 
-- **DTLS 1.3 Encryption**: All peer-to-peer data channel packets are end-to-end encrypted with standard DTLS-SRTP.
-- **Rejection Sampling**: Pairing PINs use uniform Web Crypto CSPRNG rejection sampling to avoid modulo bias.
-- **Memory Protection**: ArrayBuffers are loaded in 32 KB slices and released once acknowledged.
-- **Rate Limiting**: Ephemeral signaling endpoints enforce per-IP rate limits to prevent brute-force pairing discovery.
-- **Explicit Receiver Consent**: No payload bytes are accepted without user interaction.
+- **DTLS Encryption**: Peer-to-peer data channel packets are end-to-end encrypted with standard WebRTC DTLS.
+- **Rejection Sampling**: Pairing PINs use uniform Web Crypto CSPRNG rejection sampling to eliminate modulo bias.
+- **Capability Tokens**: Receiver session control operations require an unguessable 192-bit CSPRNG capability token.
+- **Payload & Rate Throttling**: Ephemeral signaling endpoints enforce per-IP rate limits and a 64 KB JSON payload ceiling.
+- **Explicit Receiver Consent**: No payload bytes are transmitted without interactive receiver approval.

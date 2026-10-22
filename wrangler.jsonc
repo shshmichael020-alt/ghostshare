@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "ghostshare",
-  "main": ".open-next/worker.js",
+  "main": "./worker.ts",
   "compatibility_date": "2026-07-30",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
@@ -12,6 +12,20 @@
     {
       "binding": "SESSIONS_KV",
       "id": "11ae6342a63f47a3879336e76d3fb484"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SIGNALING_DO",
+        "class_name": "SignalingSessionDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SignalingSessionDO"]
     }
   ]
 }

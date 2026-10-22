@@ -10,6 +10,8 @@ import {
   closeSignalingSession,
   updateSessionTtl,
   DEFAULT_SESSION_TTL_SECONDS,
+  setTestStorageNamespace,
+  createInMemoryTestNamespace,
 } from "../lib/signalStore";
 import {
   DEFAULT_ICE_SERVERS,
@@ -62,21 +64,23 @@ test("WebRTC Protocol: serializes and parses control messages cleanly", () => {
 });
 
 test("Signaling Store: session lifecycle, joining, posting, and role-filtered polling", async () => {
+  setTestStorageNamespace(createInMemoryTestNamespace());
   const testCode = "99887766";
   await closeSignalingSession(testCode);
 
-  // 1. Create session with 1-hour (3600s) default TTL
-  const session = await createSignalingSession(testCode);
+  // 1. Create session with 1-hour (3600s) default TTL and receive receiver capability token
+  const { session, receiverToken } = await createSignalingSession(testCode);
   assert.equal(session.code, testCode);
   assert.equal(DEFAULT_SESSION_TTL_SECONDS, 3600, "Default TTL must be 1 hour");
   assert.equal(session.receiverActive, true);
   assert.equal(session.senderActive, false);
+  assert.ok(typeof receiverToken === "string" && receiverToken.length >= 16);
   const remainingSeconds = Math.round((session.expiresAt - session.createdAt) / 1000);
   assert.equal(remainingSeconds, 3600, "Initial TTL must be 3600 seconds (1 hour)");
 
-  // 1b. Update session TTL to 2 hours (7200s)
-  const updatedTtl = await updateSessionTtl(testCode, 7200);
-  assert.equal(updatedTtl, true);
+  // 1b. Update session TTL to 2 hours (7200s) with valid receiver token
+  const updatedTtl = await updateSessionTtl(testCode, 7200, receiverToken);
+  assert.equal(updatedTtl.ok, true);
   const updatedSession = await getSignalingSession(testCode);
   const updatedRemaining = Math.round((updatedSession!.expiresAt - updatedSession!.createdAt) / 1000);
   assert.equal(updatedRemaining, 7200, "Updated TTL must be 7200 seconds (2 hours)");

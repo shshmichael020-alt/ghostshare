@@ -13,276 +13,431 @@ export interface SignalingSession {
   code: string;
   createdAt: number;
   expiresAt: number;
+  remainingSeconds?: number;
   receiverActive: boolean;
   senderActive: boolean;
-  messages: SignalMessage[];
+  receiverToken?: string;
 }
 
-// In-memory fallback and L1 cache
-const localSessions = new Map<string, SignalingSession>();
+export interface SignalingStorageStub {
+  fetch(request: Request): Promise<Response>;
+}
 
-declare global {
-  var __SESSIONS_KV__: KVNamespace | undefined;
+export interface SignalingStorageNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): SignalingStorageStub;
 }
 
 export const DEFAULT_SESSION_TTL_SECONDS = 3600; // 1 hour default pairing window
 
-export async function getKvBinding(): Promise<KVNamespace | null> {
-  if (globalThis.__SESSIONS_KV__) {
-    return globalThis.__SESSIONS_KV__;
+// Optional test adapter for Node unit tests
+let testStorageNamespace: SignalingStorageNamespace | null = null;
+
+export function setTestStorageNamespace(ns: SignalingStorageNamespace | null): void {
+  testStorageNamespace = ns;
+}
+
+/**
+ * Resolves the authoritative storage binding from the current request context.
+ * In production, this resolves the SQLite-backed Durable Object namespace.
+ * Fails closed if the binding is absent.
+ */
+export function resolveStorageBinding(explicitBinding?: unknown): SignalingStorageNamespace {
+  if (explicitBinding && typeof (explicitBinding as SignalingStorageNamespace).idFromName === "function") {
+    return explicitBinding as SignalingStorageNamespace;
+  }
+
+  if (testStorageNamespace) {
+    return testStorageNamespace;
   }
 
   try {
-    const ctx = await getCloudflareContext({ async: true });
-    const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
-    if (kv) {
-      globalThis.__SESSIONS_KV__ = kv;
-      return kv;
-    }
-  } catch {}
-
-  try {
-    const ctxSync = getCloudflareContext();
-    const kv = (ctxSync?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
-    if (kv) {
-      globalThis.__SESSIONS_KV__ = kv;
-      return kv;
+    const ctx = getCloudflareContext();
+    const binding = (ctx?.env as Record<string, unknown>)?.SIGNALING_DO as SignalingStorageNamespace | undefined;
+    if (binding && typeof binding.idFromName === "function") {
+      return binding;
     }
   } catch {}
 
   const g = globalThis as unknown as Record<string, unknown>;
-  const globalKv = (g.SESSIONS_KV || (g.__env__ as Record<string, unknown> | undefined)?.SESSIONS_KV) as
-    | KVNamespace
+  const globalBinding = (g.SIGNALING_DO || (g.__env__ as Record<string, unknown> | undefined)?.SIGNALING_DO) as
+    | SignalingStorageNamespace
     | undefined;
-  if (globalKv) {
-    globalThis.__SESSIONS_KV__ = globalKv;
-    return globalKv;
+  if (globalBinding && typeof globalBinding.idFromName === "function") {
+    return globalBinding;
   }
 
-  return null;
+  // Fallback for Node test runner when no test adapter was registered yet
+  if (process.env.NODE_ENV === "test") {
+    const inMemoryTestStore = createInMemoryTestNamespace();
+    testStorageNamespace = inMemoryTestStore;
+    return inMemoryTestStore;
+  }
+
+  throw new Error("Authoritative signaling storage binding (SIGNALING_DO) is unavailable");
 }
 
+function getSessionStub(storage: SignalingStorageNamespace, code: string): SignalingStorageStub {
+  const id = storage.idFromName(code);
+  return storage.get(id);
+}
+
+/**
+ * Generates a high-entropy CSPRNG receiver token for authorized session control.
+ */
+export function generateReceiverToken(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Creates an authoritative signaling session.
+ * Fails closed: if the storage write fails, throws an error.
+ */
 export async function createSignalingSession(
   code: string,
   ttlSeconds: number = DEFAULT_SESSION_TTL_SECONDS,
-): Promise<SignalingSession> {
-  const now = Date.now();
-  const session: SignalingSession = {
-    code,
-    createdAt: now,
-    expiresAt: now + ttlSeconds * 1000,
-    receiverActive: true,
-    senderActive: false,
-    messages: [],
-  };
+  explicitStorage?: unknown,
+): Promise<{ session: SignalingSession; receiverToken: string }> {
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
+  const receiverToken = generateReceiverToken();
 
-  localSessions.set(code, session);
+  const res = await stub.fetch(
+    new Request("https://internal/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, ttlSeconds, receiverToken }),
+    }),
+  );
 
-  const kv = await getKvBinding();
-  if (kv) {
-    try {
-      await kv.put(`session:${code}`, JSON.stringify(session), {
-        expirationTtl: Math.max(60, ttlSeconds),
-      });
-    } catch (err) {
-      console.warn("KV put session error:", err);
-    }
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to create authoritative session (status ${res.status}): ${errBody}`);
   }
 
-  return session;
+  const session = (await res.json()) as SignalingSession;
+  return { session, receiverToken };
 }
 
-export async function getSignalingSession(code: string): Promise<SignalingSession | null> {
-  const kv = await getKvBinding();
-  if (kv) {
-    try {
-      const data = await kv.get<SignalingSession>(`session:${code}`, "json");
-      if (data) {
-        if (Date.now() > data.expiresAt) {
-          await kv.delete(`session:${code}`);
-          localSessions.delete(code);
-          return null;
-        }
-        localSessions.set(code, data);
-        return data;
-      }
-    } catch (err) {
-      console.warn("KV get session error:", err);
-    }
-  }
+/**
+ * Retrieves an active signaling session.
+ * Returns null if not found or expired.
+ * Throws if the authoritative store is unreachable.
+ */
+export async function getSignalingSession(
+  code: string,
+  explicitStorage?: unknown,
+): Promise<SignalingSession | null> {
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
 
-  const session = localSessions.get(code);
-  if (!session) return null;
-
-  if (Date.now() > session.expiresAt) {
-    localSessions.delete(code);
+  const res = await stub.fetch(new Request("https://internal/get", { method: "GET" }));
+  if (res.status === 404) {
     return null;
   }
-  return session;
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to get session from authoritative store (status ${res.status}): ${errBody}`);
+  }
+
+  return (await res.json()) as SignalingSession;
 }
 
-export async function joinSignalingSession(code: string): Promise<boolean> {
-  const session = await getSignalingSession(code);
-  if (!session) return false;
+/**
+ * Sender joins an existing session.
+ * Returns true if successfully joined, false if session not found or expired.
+ */
+export async function joinSignalingSession(code: string, explicitStorage?: unknown): Promise<boolean> {
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
 
-  session.senderActive = true;
-  localSessions.set(code, session);
-
-  const kv = await getKvBinding();
-  if (kv) {
-    try {
-      const ttl = Math.max(60, Math.round((session.expiresAt - Date.now()) / 1000));
-      await kv.put(`session:${code}`, JSON.stringify(session), { expirationTtl: ttl });
-    } catch (err) {
-      console.warn("KV join update error:", err);
-    }
+  const res = await stub.fetch(new Request("https://internal/join", { method: "POST" }));
+  if (res.status === 404) {
+    return false;
+  }
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to join session (status ${res.status}): ${errBody}`);
   }
 
   return true;
 }
 
-export async function updateSessionTtl(code: string, ttlSeconds: number): Promise<boolean> {
-  const session = await getSignalingSession(code);
-  if (!session) return false;
+/**
+ * Updates the session TTL. Requires valid receiverToken.
+ * Throws 403 on invalid token or if authoritative store write fails.
+ */
+export async function updateSessionTtl(
+  code: string,
+  ttlSeconds: number,
+  receiverToken: string,
+  explicitStorage?: unknown,
+): Promise<{ ok: boolean; expiresAt?: number; remainingSeconds?: number }> {
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
 
-  session.expiresAt = session.createdAt + ttlSeconds * 1000;
-  localSessions.set(code, session);
+  const res = await stub.fetch(
+    new Request("https://internal/update-ttl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ttlSeconds, receiverToken }),
+    }),
+  );
 
-  const kv = await getKvBinding();
-  if (kv) {
-    try {
-      await kv.put(`session:${code}`, JSON.stringify(session), {
-        expirationTtl: Math.max(60, ttlSeconds),
-      });
-    } catch (err) {
-      console.warn("KV update TTL error:", err);
-    }
+  if (res.status === 404) {
+    return { ok: false };
+  }
+  if (res.status === 403) {
+    throw new Error("Unauthorized: Invalid receiver token");
+  }
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to update session TTL (status ${res.status}): ${errBody}`);
   }
 
-  return true;
+  return (await res.json()) as { ok: boolean; expiresAt: number; remainingSeconds: number };
 }
 
+/**
+ * Posts a signaling message to the session's authoritative queue.
+ * Throws if the message could not be persisted.
+ */
 export async function postSignalMessage(
   code: string,
   sender: "receiver" | "sender",
   target: "receiver" | "sender",
   type: SignalMessage["type"],
   data: unknown,
+  explicitStorage?: unknown,
 ): Promise<boolean> {
-  try {
-    const session = await getSignalingSession(code);
-    if (!session) return false;
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
 
-    const msg: SignalMessage = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      sender,
-      target,
-      type,
-      data,
-      timestamp: Date.now(),
-    };
+  const res = await stub.fetch(
+    new Request("https://internal/post-message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sender, target, type, data }),
+    }),
+  );
 
-    if (!Array.isArray(session.messages)) {
-      session.messages = [];
-    }
-    session.messages.push(msg);
-
-    // Keep message history small (max 50 signaling messages per session)
-    if (session.messages.length > 50) {
-      session.messages.splice(0, session.messages.length - 50);
-    }
-
-    localSessions.set(code, session);
-
-    const kv = await getKvBinding();
-    if (kv) {
-      try {
-        const remainingSec =
-          typeof session.expiresAt === "number"
-            ? Math.round((session.expiresAt - Date.now()) / 1000)
-            : 3600;
-        const ttl = Math.max(60, isNaN(remainingSec) ? 3600 : remainingSec);
-        await kv.put(`session:${code}`, JSON.stringify(session), { expirationTtl: ttl });
-        // Dedicated mailbox for primary offer/answer handshake messages
-        if (type === "offer" || type === "answer") {
-          await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
-        } else if (type === "candidate" || type === "candidate-batch") {
-          // Store candidates in dedicated list without overwriting offer/answer
-          const existingCands = (await kv.get<SignalMessage[]>(`cands:${code}:${target}`, "json")) || [];
-          existingCands.push(msg);
-          if (existingCands.length > 30) existingCands.splice(0, existingCands.length - 30);
-          await kv.put(`cands:${code}:${target}`, JSON.stringify(existingCands), { expirationTtl: ttl });
-        }
-      } catch (err) {
-        console.warn("KV post message error:", err);
-      }
-    }
-
-    return true;
-  } catch (err) {
-    console.error("Critical error in postSignalMessage:", err);
+  if (res.status === 404) {
     return false;
   }
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to post signal message (status ${res.status}): ${errBody}`);
+  }
+
+  return true;
 }
 
+/**
+ * Polls for new signaling messages destined for a given role since a timestamp.
+ */
 export async function pollSignalMessages(
   code: string,
   forRole: "receiver" | "sender",
   sinceTimestamp: number,
+  explicitStorage?: unknown,
 ): Promise<SignalMessage[]> {
-  try {
-    const session = await getSignalingSession(code);
-    const foundMessages = new Map<string, SignalMessage>();
+  const storage = resolveStorageBinding(explicitStorage);
+  const stub = getSessionStub(storage, code);
 
-    if (session && Array.isArray(session.messages)) {
-      for (const m of session.messages) {
-        if (m && m.target === forRole && m.timestamp > sinceTimestamp) {
-          foundMessages.set(m.id, m);
-        }
-      }
-    }
+  const url = `https://internal/poll?target=${encodeURIComponent(forRole)}&since=${sinceTimestamp}`;
+  const res = await stub.fetch(new Request(url, { method: "GET" }));
 
-    // Also check target role's dedicated mailbox in KV
-    const kv = await getKvBinding();
-    if (kv) {
-      try {
-        const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
-        if (directMsg && directMsg.timestamp > sinceTimestamp) {
-          foundMessages.set(directMsg.id, directMsg);
-        }
-      } catch {
-        // ignored
-      }
-
-      try {
-        const directCands = await kv.get<SignalMessage[]>(`cands:${code}:${forRole}`, "json");
-        if (Array.isArray(directCands)) {
-          for (const c of directCands) {
-            if (c && c.timestamp > sinceTimestamp) {
-              foundMessages.set(c.id, c);
-            }
-          }
-        }
-      } catch {
-        // ignored
-      }
-    }
-
-    return Array.from(foundMessages.values()).sort((a, b) => a.timestamp - b.timestamp);
-  } catch (err) {
-    console.error("Critical error in pollSignalMessages:", err);
+  if (res.status === 404) {
     return [];
+  }
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Failed to poll signal messages (status ${res.status}): ${errBody}`);
+  }
+
+  const json = (await res.json()) as { messages: SignalMessage[] };
+  return json.messages || [];
+}
+
+/**
+ * Closes and purges an active signaling session.
+ */
+export async function closeSignalingSession(
+  code: string,
+  receiverToken?: string,
+  explicitStorage?: unknown,
+): Promise<boolean> {
+  try {
+    const storage = resolveStorageBinding(explicitStorage);
+    const stub = getSessionStub(storage, code);
+
+    const res = await stub.fetch(
+      new Request("https://internal/close", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ receiverToken }),
+      }),
+    );
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
-export async function closeSignalingSession(code: string): Promise<void> {
-  localSessions.delete(code);
-  const kv = await getKvBinding();
-  if (kv) {
-    try {
-      await kv.delete(`session:${code}`);
-    } catch {
-      // ignore
-    }
+/**
+ * In-memory test store implementation for isolated unit testing.
+ * Simulates SQLite Durable Object behavior without workerd.
+ */
+export function createInMemoryTestNamespace(): SignalingStorageNamespace {
+  interface InMemorySession {
+    code: string;
+    createdAt: number;
+    expiresAt: number;
+    receiverActive: boolean;
+    senderActive: boolean;
+    receiverToken: string;
+    messages: SignalMessage[];
   }
+
+  const sessions = new Map<string, InMemorySession>();
+
+  return {
+    idFromName(name: string) {
+      return name;
+    },
+    get(id: unknown): SignalingStorageStub {
+      const code = String(id);
+
+      return {
+        async fetch(request: Request): Promise<Response> {
+          const url = new URL(request.url);
+          const path = url.pathname;
+
+          if (request.method === "POST" && path === "/create") {
+            const body = (await request.json()) as {
+              code: string;
+              ttlSeconds: number;
+              receiverToken: string;
+            };
+            const now = Date.now();
+            const existing = sessions.get(body.code);
+            if (existing && existing.expiresAt > now) {
+              return new Response(JSON.stringify({ error: "Session code collision" }), { status: 409 });
+            }
+            const session: InMemorySession = {
+              code: body.code,
+              createdAt: now,
+              expiresAt: now + body.ttlSeconds * 1000,
+              receiverActive: true,
+              senderActive: false,
+              receiverToken: body.receiverToken,
+              messages: [],
+            };
+            sessions.set(body.code, session);
+            return new Response(JSON.stringify(session), { status: 200 });
+          }
+
+          if (request.method === "GET" && path === "/get") {
+            const s = sessions.get(code);
+            if (!s) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+            if (Date.now() > s.expiresAt) {
+              sessions.delete(code);
+              return new Response(JSON.stringify({ error: "Expired" }), { status: 404 });
+            }
+            return new Response(
+              JSON.stringify({
+                code: s.code,
+                createdAt: s.createdAt,
+                expiresAt: s.expiresAt,
+                remainingSeconds: Math.max(0, Math.round((s.expiresAt - Date.now()) / 1000)),
+                receiverActive: s.receiverActive,
+                senderActive: s.senderActive,
+              }),
+              { status: 200 },
+            );
+          }
+
+          if (request.method === "POST" && path === "/join") {
+            const s = sessions.get(code);
+            if (!s) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+            if (Date.now() > s.expiresAt) {
+              sessions.delete(code);
+              return new Response(JSON.stringify({ error: "Expired" }), { status: 404 });
+            }
+            s.senderActive = true;
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+
+          if (request.method === "POST" && path === "/update-ttl") {
+            const body = (await request.json()) as { ttlSeconds: number; receiverToken: string };
+            const s = sessions.get(code);
+            if (!s) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+            if (Date.now() > s.expiresAt) {
+              sessions.delete(code);
+              return new Response(JSON.stringify({ error: "Expired" }), { status: 404 });
+            }
+            if (s.receiverToken !== body.receiverToken) {
+              return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 403 });
+            }
+            s.expiresAt = s.createdAt + body.ttlSeconds * 1000;
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                expiresAt: s.expiresAt,
+                remainingSeconds: Math.max(0, Math.round((s.expiresAt - Date.now()) / 1000)),
+              }),
+              { status: 200 },
+            );
+          }
+
+          if (request.method === "POST" && path === "/post-message") {
+            const s = sessions.get(code);
+            if (!s || Date.now() > s.expiresAt) {
+              return new Response(JSON.stringify({ error: "Not found or expired" }), { status: 404 });
+            }
+            const body = (await request.json()) as {
+              sender: "receiver" | "sender";
+              target: "receiver" | "sender";
+              type: SignalMessage["type"];
+              data: unknown;
+            };
+            const msg: SignalMessage = {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              sender: body.sender,
+              target: body.target,
+              type: body.type,
+              data: body.data,
+              timestamp: Date.now(),
+            };
+            s.messages.push(msg);
+            if (s.messages.length > 100) s.messages.shift();
+            return new Response(JSON.stringify({ ok: true, id: msg.id }), { status: 200 });
+          }
+
+          if (request.method === "GET" && path === "/poll") {
+            const s = sessions.get(code);
+            if (!s || Date.now() > s.expiresAt) {
+              return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+            }
+            const target = url.searchParams.get("target");
+            const sinceStr = url.searchParams.get("since");
+            const since = sinceStr ? parseInt(sinceStr, 10) : 0;
+            const messages = s.messages.filter((m) => m.target === target && m.timestamp > since);
+            return new Response(JSON.stringify({ messages }), { status: 200 });
+          }
+
+          if (request.method === "DELETE" && path === "/close") {
+            sessions.delete(code);
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+
+          return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+        },
+      };
+    },
+  };
 }

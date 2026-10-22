@@ -1,17 +1,25 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { getSignalingSession, joinSignalingSession, updateSessionTtl } from "@/lib/signalStore";
+import {
+  getSignalingSession,
+  joinSignalingSession,
+  updateSessionTtl,
+  closeSignalingSession,
+  SignalingStorageNamespace,
+} from "@/lib/signalStore";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
+import { isValidTtl } from "@/lib/constants";
 
-export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
+function getBinding(): SignalingStorageNamespace | undefined {
   try {
     const ctx = getCloudflareContext();
-    const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
-    if (kv) {
-      (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
-    }
-  } catch {}
+    return (ctx?.env as Record<string, unknown>)?.SIGNALING_DO as SignalingStorageNamespace | undefined;
+  } catch {
+    return undefined;
+  }
+}
 
+export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
   const { code } = await params;
 
   if (!code || !/^\d{8}$/.test(code)) {
@@ -19,7 +27,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
   }
 
   const ip = getClientIp(request);
-  const rl = checkRateLimit("session_check", ip, 80, 60_000);
+  const rl = checkRateLimit("session_check", ip, 120, 60_000);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests. Please wait a moment." },
@@ -27,41 +35,46 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     );
   }
 
-  let session = await getSignalingSession(code);
-  if (!session) {
-    // Brief retry in case of edge cross-PoP propagation latency
-    await new Promise((r) => setTimeout(r, 400));
-    session = await getSignalingSession(code);
-  }
+  try {
+    const binding = getBinding();
+    const session = await getSignalingSession(code, binding);
 
-  if (!session) {
+    if (!session) {
+      return NextResponse.json(
+        { error: "Pairing code not found or expired" },
+        {
+          status: 404,
+          headers: {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "CDN-Cache-Control": "no-store",
+          },
+        },
+      );
+    }
+
     return NextResponse.json(
-      { error: "Pairing code not found or expired" },
       {
-        status: 404,
+        code: session.code,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        remainingSeconds: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),
+        receiverActive: session.receiverActive,
+        senderActive: session.senderActive,
+      },
+      {
         headers: {
           "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
           "CDN-Cache-Control": "no-store",
         },
       },
     );
+  } catch (err) {
+    console.error("Session lookup error:", err);
+    return NextResponse.json(
+      { error: "Failed to query authoritative session store", details: (err as Error).message },
+      { status: 503 },
+    );
   }
-
-  return NextResponse.json(
-    {
-      code: session.code,
-      expiresAt: session.expiresAt,
-      remainingSeconds: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),
-      receiverActive: session.receiverActive,
-      senderActive: session.senderActive,
-    },
-    {
-      headers: {
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-        "CDN-Cache-Control": "no-store",
-      },
-    },
-  );
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ code: string }> }) {
@@ -71,12 +84,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
     return NextResponse.json({ error: "Invalid 8-digit code format" }, { status: 400 });
   }
 
-  const success = await joinSignalingSession(code);
-  if (!success) {
-    return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
+  const ip = getClientIp(request);
+  const rl = checkRateLimit("session_join", ip, 60, 60_000);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many join attempts. Please wait a moment." },
+      { status: 429, headers: { "Retry-After": String(rl.reset) } },
+    );
   }
 
-  return NextResponse.json({ ok: true, code });
+  try {
+    const binding = getBinding();
+    const success = await joinSignalingSession(code, binding);
+    if (!success) {
+      return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
+    }
+
+    return NextResponse.json({ ok: true, code });
+  } catch (err) {
+    console.error("Session join error:", err);
+    return NextResponse.json(
+      { error: "Failed to join session", details: (err as Error).message },
+      { status: 503 },
+    );
+  }
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ code: string }> }) {
@@ -87,24 +118,62 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
   }
 
   try {
-    const { ttlSeconds } = (await request.json()) as { ttlSeconds?: number };
-    if (!ttlSeconds || typeof ttlSeconds !== "number" || ttlSeconds <= 0) {
-      return NextResponse.json({ error: "Invalid ttlSeconds" }, { status: 400 });
+    const body = (await request.json()) as { ttlSeconds?: unknown; receiverToken?: string };
+    const { ttlSeconds, receiverToken } = body;
+
+    if (!isValidTtl(ttlSeconds)) {
+      return NextResponse.json(
+        { error: "Invalid ttlSeconds. Must match one of the predefined duration options." },
+        { status: 400 },
+      );
     }
 
-    const updated = await updateSessionTtl(code, ttlSeconds);
-    if (!updated) {
+    if (!receiverToken || typeof receiverToken !== "string") {
+      return NextResponse.json(
+        { error: "Missing or invalid receiverToken capability" },
+        { status: 401 },
+      );
+    }
+
+    const binding = getBinding();
+    const result = await updateSessionTtl(code, ttlSeconds, receiverToken, binding);
+    if (!result.ok) {
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
     }
 
-    const session = await getSignalingSession(code);
     return NextResponse.json({
       ok: true,
-      expiresAt: session?.expiresAt,
-      remainingSeconds: session ? Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)) : 0,
+      expiresAt: result.expiresAt,
+      remainingSeconds: result.remainingSeconds,
     });
   } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("Unauthorized")) {
+      return NextResponse.json({ error: "Unauthorized: Invalid receiver token" }, { status: 403 });
+    }
     console.error("Failed to update TTL:", err);
-    return NextResponse.json({ error: "Failed to update TTL" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to update TTL", details: msg }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  const { code } = await params;
+
+  if (!code || !/^\d{8}$/.test(code)) {
+    return NextResponse.json({ error: "Invalid 8-digit code format" }, { status: 400 });
+  }
+
+  try {
+    let receiverToken: string | undefined;
+    try {
+      const body = (await request.json()) as { receiverToken?: string };
+      receiverToken = body?.receiverToken;
+    } catch {}
+
+    const binding = getBinding();
+    await closeSignalingSession(code, receiverToken, binding);
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    return NextResponse.json({ error: "Failed to close session", details: (err as Error).message }, { status: 500 });
   }
 }

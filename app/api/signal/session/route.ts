@@ -1,21 +1,20 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateUniqueCode } from "@/lib/codes";
-import { createSignalingSession } from "@/lib/signalStore";
+import { createSignalingSession, SignalingStorageNamespace } from "@/lib/signalStore";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
+import { DEFAULT_TTL_SECONDS, isValidTtl } from "@/lib/constants";
 
 export async function POST(request: Request) {
   try {
+    let binding: SignalingStorageNamespace | undefined;
     try {
       const ctx = getCloudflareContext();
-      const kv = (ctx?.env as Record<string, unknown>)?.SESSIONS_KV as KVNamespace | undefined;
-      if (kv) {
-        (globalThis as unknown as Record<string, unknown>).__SESSIONS_KV__ = kv;
-      }
+      binding = (ctx?.env as Record<string, unknown>)?.SIGNALING_DO as SignalingStorageNamespace | undefined;
     } catch {}
 
     const ip = getClientIp(request);
-    const rl = checkRateLimit("session_create", ip, 80, 60_000);
+    const rl = checkRateLimit("session_create", ip, 40, 60_000);
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many session creation requests. Please wait a moment." },
@@ -23,26 +22,45 @@ export async function POST(request: Request) {
       );
     }
 
-    let ttlSeconds = 3600; // 1 hour default
+    let ttlSeconds = DEFAULT_TTL_SECONDS;
     try {
-      const body = (await request.json()) as { ttlSeconds?: number };
-      if (body && typeof body.ttlSeconds === "number" && body.ttlSeconds > 0) {
+      const body = (await request.json()) as { ttlSeconds?: unknown };
+      if (body && typeof body.ttlSeconds !== "undefined") {
+        if (!isValidTtl(body.ttlSeconds)) {
+          return NextResponse.json(
+            { error: "Invalid ttlSeconds. Must be a supported duration option." },
+            { status: 400 },
+          );
+        }
         ttlSeconds = body.ttlSeconds;
       }
     } catch {
-      // Body empty or not JSON, use default 3600
+      // Empty or non-JSON body: proceed with default TTL
     }
 
-    const code = await generateUniqueCode();
-    const session = await createSignalingSession(code, ttlSeconds);
+    const code = await generateUniqueCode(binding);
+    const { session, receiverToken } = await createSignalingSession(code, ttlSeconds, binding);
 
-    return NextResponse.json({
-      code: session.code,
-      createdAt: session.createdAt,
-      expiresAt: session.expiresAt,
-    });
+    return NextResponse.json(
+      {
+        code: session.code,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        receiverToken,
+      },
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "CDN-Cache-Control": "no-store",
+        },
+      },
+    );
   } catch (err) {
     console.error("Session creation error:", err);
-    return NextResponse.json({ error: "Could not create pairing session" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Could not create authoritative pairing session", details: (err as Error).message },
+      { status: 503 },
+    );
   }
 }

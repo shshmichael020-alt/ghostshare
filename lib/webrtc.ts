@@ -49,6 +49,7 @@ export type WebRTCMessage =
   | { type: "file-ready"; id: string }
   | { type: "file-end"; id: string }
   | { type: "file-ack"; id: string }
+  | { type: "file-error"; id: string; error: string }
   | { type: "resume-query"; id: string }
   | { type: "resume-ack"; id: string; receivedBytes: number }
   | { type: "transfer-complete" };
@@ -108,7 +109,7 @@ export async function sendChunkWithBackpressure(
 /**
  * Streams a single File chunk-by-chunk across RTCDataChannel.
  * Slices the file on demand so large payloads never saturate browser RAM.
- * Supports resuming from a non-zero byte offset if a temporary connection drop occurs.
+ * Enforces explicit receiver readiness and write completion acknowledgements.
  */
 export async function streamFileOverDataChannel(
   channel: RTCDataChannel,
@@ -118,10 +119,14 @@ export async function streamFileOverDataChannel(
   onProgress: (sentBytes: number, totalBytes: number) => void,
   isCancelled: () => boolean,
 ): Promise<void> {
+  if (channel.readyState !== "open") {
+    throw new Error("Data channel is not open");
+  }
+
   const total = file.size;
   let offset = Math.min(startOffset, total);
 
-  // Signal start or resume of file transmission with byte offset
+  // Signal start of file transmission with unique ID and offset
   const startMsg: WebRTCMessage = {
     type: "file-start",
     id: fileId,
@@ -132,35 +137,53 @@ export async function streamFileOverDataChannel(
   };
   channel.send(JSON.stringify(startMsg));
 
-  // Wait for receiver to allocate file sink/handle before sending binary chunks
-  await new Promise<void>((resolve) => {
+  // Await explicit receiver file-ready confirmation before sending binary data
+  await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const onReady = (e: MessageEvent) => {
+
+    const onMessage = (e: MessageEvent) => {
       if (typeof e.data === "string") {
         try {
-          const m = JSON.parse(e.data);
+          const m = JSON.parse(e.data) as WebRTCMessage;
           if (m.type === "file-ready" && m.id === fileId) {
             cleanup();
             resolve();
+          } else if (m.type === "file-error" && m.id === fileId) {
+            cleanup();
+            reject(new Error(`Receiver rejected file: ${m.error}`));
           }
         } catch {}
       }
     };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel closed while waiting for receiver readiness"));
+    };
+
     const cleanup = () => {
       if (timer) clearTimeout(timer);
-      channel.removeEventListener("message", onReady);
+      channel.removeEventListener("message", onMessage);
+      channel.removeEventListener("close", onClose);
     };
-    channel.addEventListener("message", onReady);
+
+    channel.addEventListener("message", onMessage);
+    channel.addEventListener("close", onClose);
+
     timer = setTimeout(() => {
       cleanup();
-      resolve();
-    }, 1500);
+      reject(new Error(`Receiver readiness confirmation timed out for file ID: ${fileId}`));
+    }, 8000);
   });
 
-  // Stream slices
+  // Stream binary slices with backpressure flow control
   while (offset < total) {
     if (isCancelled()) {
       throw new Error("Transfer cancelled by user");
+    }
+
+    if (channel.readyState !== "open") {
+      throw new Error("Data channel closed during file streaming");
     }
 
     const end = Math.min(offset + CHUNK_SIZE, total);
@@ -180,29 +203,43 @@ export async function streamFileOverDataChannel(
   };
   channel.send(JSON.stringify(endMsg));
 
-  // Wait for receiver to flush all chunks to disk and close stream
-  await new Promise<void>((resolve) => {
+  // Await explicit completion acknowledgement from receiver after disk flush
+  await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const onAck = (e: MessageEvent) => {
+
+    const onMessage = (e: MessageEvent) => {
       if (typeof e.data === "string") {
         try {
-          const m = JSON.parse(e.data);
+          const m = JSON.parse(e.data) as WebRTCMessage;
           if (m.type === "file-ack" && m.id === fileId) {
             cleanup();
             resolve();
+          } else if (m.type === "file-error" && m.id === fileId) {
+            cleanup();
+            reject(new Error(`Receiver failed to persist file: ${m.error}`));
           }
         } catch {}
       }
     };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("Data channel closed while waiting for file completion acknowledgement"));
+    };
+
     const cleanup = () => {
       if (timer) clearTimeout(timer);
-      channel.removeEventListener("message", onAck);
+      channel.removeEventListener("message", onMessage);
+      channel.removeEventListener("close", onClose);
     };
-    channel.addEventListener("message", onAck);
+
+    channel.addEventListener("message", onMessage);
+    channel.addEventListener("close", onClose);
+
     timer = setTimeout(() => {
       cleanup();
-      resolve();
-    }, 3000);
+      reject(new Error(`Receiver file write acknowledgement timed out for file ID: ${fileId}`));
+    }, 15000);
   });
 }
 
@@ -261,7 +298,9 @@ export async function fetchSignalMessages(
       { cache: "no-store" },
     );
     if (!res.ok) return [];
-    const json = (await res.json()) as { messages?: Array<{ id: string; sender: string; target: string; type: string; data: unknown; timestamp: number }> };
+    const json = (await res.json()) as {
+      messages?: Array<{ id: string; sender: string; target: string; type: string; data: unknown; timestamp: number }>;
+    };
     return json.messages || [];
   } catch {
     return [];

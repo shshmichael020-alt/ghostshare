@@ -18,11 +18,16 @@ export function generateSecureCode(): string {
   }
 }
 
-export async function generateUniqueCode(): Promise<string> {
+export async function generateUniqueCode(explicitStorage?: unknown): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateSecureCode();
-    const existing = await getSignalingSession(code);
-    if (!existing) return code;
+    try {
+      const existing = await getSignalingSession(code, explicitStorage);
+      if (!existing) return code;
+    } catch {
+      // If store check returned not found or non-fatal, proceed
+      return code;
+    }
   }
   throw new Error("Could not generate a unique pairing code, please retry");
 }

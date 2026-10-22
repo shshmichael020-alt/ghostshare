@@ -82,6 +82,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSignalTimestamp = useRef<number>(0);
   const codeRef = useRef<string | null>(null);
+  const receiverTokenRef = useRef<string | null>(null);
   const hasMountedRef = useRef<boolean>(false);
   const hasAnsweredRef = useRef<boolean>(false);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
@@ -150,60 +151,77 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             const startOffset = msg.offset ?? 0;
             pendingChunksRef.current = [];
 
-            // Stream directly onto local disk/OPFS
-            const sink = await createIncomingFileSink(
-              codeRef.current || "default",
-              msg.name,
-              msg.mimeType,
-              startOffset,
-            );
-            activeSinkRef.current = sink;
+            try {
+              // Stream directly onto local disk/OPFS with collision-free fileId and size check
+              const sink = await createIncomingFileSink(
+                codeRef.current || "default",
+                msg.id,
+                msg.name,
+                msg.mimeType,
+                msg.size,
+                startOffset,
+              );
+              activeSinkRef.current = sink;
 
-            // Drain any chunks that arrived while the sink handle was opening
-            if (pendingChunksRef.current.length > 0) {
-              for (const earlyChunk of pendingChunksRef.current) {
-                await sink.write(earlyChunk);
+              // Drain any chunks that arrived while the sink handle was opening
+              if (pendingChunksRef.current.length > 0) {
+                for (const earlyChunk of pendingChunksRef.current) {
+                  await sink.write(earlyChunk);
+                }
+                pendingChunksRef.current = [];
               }
-              pendingChunksRef.current = [];
+
+              setActiveReceiving({
+                id: msg.id,
+                name: msg.name,
+                size: msg.size,
+                receivedBytes: sink.getBytesWritten(),
+              });
+
+              // Signal sender that sink is ready
+              channel.send(JSON.stringify({ type: "file-ready", id: msg.id }));
+            } catch (sinkErr) {
+              console.error("Sink allocation error:", sinkErr);
+              channel.send(JSON.stringify({ type: "file-error", id: msg.id, error: (sinkErr as Error).message }));
+              push(`Storage error for ${msg.name}: ${(sinkErr as Error).message}`, "error");
             }
-
-            setActiveReceiving({
-              id: msg.id,
-              name: msg.name,
-              size: msg.size,
-              receivedBytes: sink.getBytesWritten(),
-            });
-
-            // Signal sender that sink is ready from byte 0
-            channel.send(JSON.stringify({ type: "file-ready", id: msg.id }));
           } else if (msg.type === "file-end") {
             const meta = currentMetaRef.current;
             const sink = activeSinkRef.current;
 
             if (meta && sink) {
-              const file = await sink.close();
-              const downloadUrl = URL.createObjectURL(file);
-              const completedItem: ReceivedFileItem = {
-                id: meta.id,
-                name: meta.name,
-                size: file.size,
-                downloadUrl,
-                blob: file,
-                receivedAt: Date.now(),
-              };
+              try {
+                const file = await sink.close();
+                const downloadUrl = URL.createObjectURL(file);
+                const completedItem: ReceivedFileItem = {
+                  id: meta.id,
+                  name: meta.name,
+                  size: file.size,
+                  downloadUrl,
+                  blob: file,
+                  receivedAt: Date.now(),
+                };
 
-              setReceivedFiles((prev) => {
-                const existing = prev.filter((f) => f.id !== meta.id);
-                return [...existing, completedItem];
-              });
+                setReceivedFiles((prev) => {
+                  const existing = prev.filter((f) => f.id !== meta.id);
+                  return [...existing, completedItem];
+                });
 
-              setActiveReceiving(null);
-              activeSinkRef.current = null;
-              currentMetaRef.current = null;
+                setActiveReceiving(null);
+                activeSinkRef.current = null;
+                currentMetaRef.current = null;
 
-              // Acknowledge file completion
-              channel.send(JSON.stringify({ type: "file-ack", id: meta.id }));
-              push(`Received: ${meta.name} (Disk cached)`, "success");
+                // Acknowledge file completion
+                channel.send(JSON.stringify({ type: "file-ack", id: meta.id }));
+                push(`Received: ${meta.name} (Verified & Persisted)`, "success");
+              } catch (closeErr) {
+                console.error("File finalization error:", closeErr);
+                channel.send(JSON.stringify({ type: "file-error", id: meta.id, error: (closeErr as Error).message }));
+                push(`Verification failed for ${meta.name}: ${(closeErr as Error).message}`, "error");
+                setActiveReceiving(null);
+                activeSinkRef.current = null;
+                currentMetaRef.current = null;
+              }
             }
           } else if (msg.type === "resume-query") {
             // Sender asks how many bytes receiver has for this file
@@ -274,9 +292,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         const errData = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(errData.error || "Could not start receiving session");
       }
-      const data = (await res.json()) as { code: string; expiresAt: number };
+      const data = (await res.json()) as { code: string; expiresAt: number; receiverToken?: string };
       const currentCode = data.code;
       codeRef.current = currentCode;
+      receiverTokenRef.current = data.receiverToken || null;
       setCode(currentCode);
       const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
       setRemaining(rem);
@@ -432,7 +451,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       await fetch(`/api/signal/session/${code}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ttlSeconds: newSeconds }),
+        body: JSON.stringify({ ttlSeconds: newSeconds, receiverToken: receiverTokenRef.current }),
       });
       push(`Session duration updated to ${EXPIRY_OPTIONS.find((o) => o.seconds === newSeconds)?.label}`, "default");
     } catch {
