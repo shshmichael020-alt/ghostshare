@@ -18,7 +18,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     );
   }
 
-  const session = getSignalingSession(code);
+  const session = await getSignalingSession(code);
   if (!session) {
     return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
   }
@@ -39,7 +39,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
     return NextResponse.json({ error: "Invalid 8-digit code format" }, { status: 400 });
   }
 
-  const success = joinSignalingSession(code);
+  const success = await joinSignalingSession(code);
   if (!success) {
     return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
   }
@@ -60,12 +60,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
       return NextResponse.json({ error: "Invalid ttlSeconds" }, { status: 400 });
     }
 
-    const updated = updateSessionTtl(code, ttlSeconds);
+    const updated = await updateSessionTtl(code, ttlSeconds);
     if (!updated) {
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
     }
 
-    const session = getSignalingSession(code);
+    const session = await getSignalingSession(code);
     return NextResponse.json({
       ok: true,
       expiresAt: session?.expiresAt,

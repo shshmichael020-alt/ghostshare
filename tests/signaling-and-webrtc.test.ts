@@ -61,12 +61,12 @@ test("WebRTC Protocol: serializes and parses control messages cleanly", () => {
   }
 });
 
-test("Signaling Store: session lifecycle, joining, posting, and role-filtered polling", () => {
+test("Signaling Store: session lifecycle, joining, posting, and role-filtered polling", async () => {
   const testCode = "99887766";
-  closeSignalingSession(testCode);
+  await closeSignalingSession(testCode);
 
   // 1. Create session with 1-hour (3600s) default TTL
-  const session = createSignalingSession(testCode);
+  const session = await createSignalingSession(testCode);
   assert.equal(session.code, testCode);
   assert.equal(DEFAULT_SESSION_TTL_SECONDS, 3600, "Default TTL must be 1 hour");
   assert.equal(session.receiverActive, true);
@@ -75,55 +75,56 @@ test("Signaling Store: session lifecycle, joining, posting, and role-filtered po
   assert.equal(remainingSeconds, 3600, "Initial TTL must be 3600 seconds (1 hour)");
 
   // 1b. Update session TTL to 2 hours (7200s)
-  const updatedTtl = updateSessionTtl(testCode, 7200);
+  const updatedTtl = await updateSessionTtl(testCode, 7200);
   assert.equal(updatedTtl, true);
-  const updatedSession = getSignalingSession(testCode);
+  const updatedSession = await getSignalingSession(testCode);
   const updatedRemaining = Math.round((updatedSession!.expiresAt - updatedSession!.createdAt) / 1000);
   assert.equal(updatedRemaining, 7200, "Updated TTL must be 7200 seconds (2 hours)");
 
   // 2. Fetch active session
-  const fetched = getSignalingSession(testCode);
+  const fetched = await getSignalingSession(testCode);
   assert.ok(fetched !== null);
   assert.equal(fetched.code, testCode);
 
   // 3. Sender joins
-  const joined = joinSignalingSession(testCode);
+  const joined = await joinSignalingSession(testCode);
   assert.equal(joined, true);
-  assert.equal(getSignalingSession(testCode)?.senderActive, true);
+  const afterJoin = await getSignalingSession(testCode);
+  assert.equal(afterJoin?.senderActive, true);
 
   // 4. Post signaling message from Sender to Receiver (e.g. SDP offer)
-  const posted = postSignalMessage(testCode, "sender", "receiver", "offer", {
+  const posted = await postSignalMessage(testCode, "sender", "receiver", "offer", {
     type: "offer",
     sdp: "v=0\r\no=...",
   });
   assert.equal(posted, true);
 
   // 5. Receiver polls and receives the offer
-  const receiverMsgs = pollSignalMessages(testCode, "receiver", 0);
+  const receiverMsgs = await pollSignalMessages(testCode, "receiver", 0);
   assert.equal(receiverMsgs.length, 1);
   assert.equal(receiverMsgs[0].type, "offer");
   assert.equal(receiverMsgs[0].sender, "sender");
   assert.equal(receiverMsgs[0].target, "receiver");
 
   // 6. Sender polls for messages targeted to sender (should be empty so far)
-  const senderMsgs = pollSignalMessages(testCode, "sender", 0);
+  const senderMsgs = await pollSignalMessages(testCode, "sender", 0);
   assert.equal(senderMsgs.length, 0);
 
   // 7. Receiver posts answer back to sender
-  postSignalMessage(testCode, "receiver", "sender", "answer", {
+  await postSignalMessage(testCode, "receiver", "sender", "answer", {
     type: "answer",
     sdp: "v=0\r\no=...",
   });
-  const senderMsgsAfterAnswer = pollSignalMessages(testCode, "sender", 0);
+  const senderMsgsAfterAnswer = await pollSignalMessages(testCode, "sender", 0);
   assert.equal(senderMsgsAfterAnswer.length, 1);
   assert.equal(senderMsgsAfterAnswer[0].type, "answer");
 
   // 8. Polling with timestamp filters out older messages
   const since = receiverMsgs[0].timestamp;
-  const noNewMsgs = pollSignalMessages(testCode, "receiver", since);
+  const noNewMsgs = await pollSignalMessages(testCode, "receiver", since);
   assert.equal(noNewMsgs.length, 0);
 
   // 9. Close session
-  closeSignalingSession(testCode);
-  assert.equal(getSignalingSession(testCode), null);
+  await closeSignalingSession(testCode);
+  assert.equal(await getSignalingSession(testCode), null);
 });

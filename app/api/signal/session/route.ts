@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     }
 
     const code = await generateUniqueCode();
-    const session = createSignalingSession(code, ttlSeconds);
+    const session = await createSignalingSession(code, ttlSeconds);
 
     return NextResponse.json({
       code: session.code,

@@ -12,6 +12,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Missing or invalid query parameters" }, { status: 400 });
   }
 
-  const messages = pollSignalMessages(code, role, since);
+  const messages = await pollSignalMessages(code, role, since);
   return NextResponse.json({ messages });
 }

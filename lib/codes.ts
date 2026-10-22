@@ -21,7 +21,7 @@ export function generateSecureCode(): string {
 export async function generateUniqueCode(): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateSecureCode();
-    const existing = getSignalingSession(code);
+    const existing = await getSignalingSession(code);
     if (!existing) return code;
   }
   throw new Error("Could not generate a unique pairing code, please retry");

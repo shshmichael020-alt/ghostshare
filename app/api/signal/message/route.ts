@@ -15,7 +15,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing required signal parameters" }, { status: 400 });
     }
 
-    const posted = postSignalMessage(code, sender, target, type, data);
+    const posted = await postSignalMessage(code, sender, target, type, data);
     if (!posted) {
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
     }
