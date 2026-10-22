@@ -127,14 +127,14 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
             <div className="space-y-1">
               <h3 className="font-body-md font-semibold text-on-surface flex items-center gap-2">
                 SCTP Chunking & Backpressure Throttling
-                <span className="font-mono-telemetry text-on-surface bg-white/10 px-2 py-0.5 rounded">
-                  250 MB CAP
+                <span className="font-mono-telemetry text-tertiary bg-tertiary/10 px-2 py-0.5 rounded border border-tertiary/20">
+                  UNLIMITED P2P
                 </span>
               </h3>
               <p className="text-sm leading-relaxed">
                 Files are streamed in 32 KB binary slices directly via `File.slice()`, avoiding browser RAM exhaustion.
                 When the WebRTC buffer exceeds 256 KB, transmission pauses automatically until the network adapter triggers
-                the `bufferedamountlow` event. Transfers are capped at 250 MB per batch.
+                the `bufferedamountlow` event. Transfers operate with zero file-size or cloud-storage caps.
               </p>
             </div>
           </div>

@@ -56,7 +56,7 @@ function GhostShareHome() {
             </span>
             <span>•</span>
             <span className="flex items-center gap-1.5 text-tertiary">
-              <Shield size={14} /> Zero Cloud Storage (250 MB Cap)
+              <Shield size={14} /> Zero Cloud Storage • Unlimited P2P
             </span>
           </div>
 

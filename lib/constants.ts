@@ -12,9 +12,8 @@ export const EXPIRY_OPTIONS = [
 export const DEFAULT_TTL_SECONDS = 60 * 60; // 1 hour - used for the waiting room, before a sender picks
 export const MAX_TTL_SECONDS = 24 * 60 * 60;
 
-// Cap applies to the WHOLE transfer (one session), not per file - a sender
-// can add file after file until this running total is reached.
-export const MAX_TRANSFER_BYTES = 250 * 1024 * 1024; // 250 MB
+// Peer-to-peer transfers are unlimited; zero cloud storage quotas apply.
+export const MAX_TRANSFER_BYTES = Infinity;
 
 export function isValidTtl(seconds: unknown): seconds is number {
   return typeof seconds === "number" && EXPIRY_OPTIONS.some((o) => o.seconds === seconds);

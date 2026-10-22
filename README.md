@@ -12,7 +12,7 @@ One device opens GhostShare in Receive mode, generating a cryptographically secu
 
 - **Zero Cloud File Storage**: No Backblaze B2, Cloudflare R2, AWS S3, or third-party buckets. File contents never touch any central server or disk.
 - **Direct WebRTC SCTP Data Channels**: Files stream as raw binary chunks (32 KB MTU) with end-to-end DTLS 1.3 encryption.
-- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM saturation on large transfers (up to 250 MB).
+- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM saturation on large, unlimited transfers.
 - **Explicit Receiver Approval**: Receiver must explicitly authorize the file transfer request before any file bytes begin transmitting.
 - **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto API CSPRNG rejection sampling with automated self-destruction after 15 minutes.
 - **Multi-File Staging & Drag-and-Drop**: Supports folder drag-and-drop, native file selection, and clipboard paste (`Ctrl+V` / `⌘+V`) for screenshots and files.

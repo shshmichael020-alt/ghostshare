@@ -27,8 +27,8 @@ test("Pairing Code: generates valid 8-digit cryptographically secure codes", () 
   assert.ok(codes.size >= total * 0.98, "High entropy and collision resistance");
 });
 
-test("Constants & Expiry: validates TTL options and 250 MB quota cap", () => {
-  assert.equal(MAX_TRANSFER_BYTES, 250 * 1024 * 1024, "Combined transfer limit must be 250 MB");
+test("Constants & Expiry: validates TTL options and unlimited transfer capacity", () => {
+  assert.equal(MAX_TRANSFER_BYTES, Infinity, "Transfer capacity must be unlimited for direct P2P");
   assert.equal(DEFAULT_TTL_SECONDS, 3600, "Default TTL must be 1 hour");
 
   // Check valid expiry seconds

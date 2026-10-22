@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { MAX_TRANSFER_BYTES } from "@/lib/constants";
 import { formatSize } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinInput from "./PinInput";
@@ -237,22 +236,13 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
   // Combined transfer size computations
   const totalStagedBytes = stagedFiles.reduce((sum, f) => sum + f.size, 0);
-  const remainingBytes = Math.max(0, MAX_TRANSFER_BYTES - totalStagedBytes);
-  const usagePct = Math.min(100, (totalStagedBytes / MAX_TRANSFER_BYTES) * 100);
 
   const handleFiles = useCallback(
     (fileList: FileList | File[]) => {
       const incoming = Array.from(fileList);
-      let budget = remainingBytes;
       const newItems: StagedItem[] = [];
 
       for (const file of incoming) {
-        if (file.size > budget) {
-          push(`${file.name} skipped — would exceed the 250 MB transfer limit`, "error");
-          continue;
-        }
-        budget -= file.size;
-
         const randomSlug = Math.random().toString(36).slice(2, 8);
         const id = `${Date.now()}-${randomSlug}-${file.name}`;
         newItems.push({
@@ -270,7 +260,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         push(`Staged ${newItems.length} file${newItems.length > 1 ? "s" : ""}`, "default");
       }
     },
-    [remainingBytes, push],
+    [push],
   );
 
   // Support paste-to-upload: Ctrl/Cmd+V files or screenshots directly
@@ -710,30 +700,21 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 ))}
               </div>
 
-              {/* Capacity Progress Telemetry Meter */}
+              {/* Volume Telemetry Meter */}
               <div className="mt-2 pt-4 border-t border-white/[0.06] flex flex-col gap-2">
                 <div className="flex items-center justify-between font-mono-telemetry">
                   <span className="text-on-surface-variant flex items-center gap-1.5">
                     <MemoryStick size={14} className="text-secondary" />
-                    <span>CAPACITY ALLOCATION</span>
+                    <span>BATCH VOLUME</span>
                   </span>
-                  <span className="text-on-surface font-medium">
-                    {formatSize(totalStagedBytes)} of 250 MB used ({Math.round(usagePct)}%)
+                  <span className="text-secondary font-medium">
+                    {formatSize(totalStagedBytes)} • Unlimited P2P Transfer
                   </span>
-                </div>
-
-                <div className="w-full h-2 rounded-full bg-surface-container-highest overflow-hidden relative">
-                  <div
-                    className={`h-full transition-all duration-300 rounded-full ${
-                      usagePct > 90 ? "bg-error" : "bg-secondary"
-                    }`}
-                    style={{ width: `${usagePct}%` }}
-                  />
                 </div>
 
                 <div className="flex items-center justify-between font-mono-telemetry text-on-surface-variant text-xs">
-                  <span>{formatSize(remainingBytes)} remaining allocation</span>
-                  <span className="text-outline-variant">Hard Cap: 250.0 MB</span>
+                  <span>Zero storage quota · Streamed in 32 KB binary slices</span>
+                  <span className="text-tertiary">Direct P2P Pipe</span>
                 </div>
               </div>
             </div>
