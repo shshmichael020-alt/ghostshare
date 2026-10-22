@@ -12,11 +12,13 @@ One device opens GhostShare in Receive mode, generating a cryptographically secu
 
 - **Zero Cloud File Storage**: No Backblaze B2, Cloudflare R2, AWS S3, or third-party buckets. File contents never touch any central server or disk.
 - **Direct WebRTC SCTP Data Channels**: Files stream as raw binary chunks (32 KB MTU) with end-to-end DTLS 1.3 encryption.
-- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM saturation on large, unlimited transfers.
+- **OPFS Zero-RAM Disk Streaming**: Direct-to-disk streaming via the Origin Private File System (OPFS) enables gigabyte-sized transfers without saturating browser memory.
+- **Memory Safety & Backpressure Control**: On-demand file slicing via `File.slice()` and `bufferedamountlow` throttling (256 KB high-water mark) prevents browser RAM saturation on large transfers.
 - **Explicit Receiver Approval**: Receiver must explicitly authorize the file transfer request before any file bytes begin transmitting.
-- **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto API CSPRNG rejection sampling with automated self-destruction after 15 minutes.
+- **8-Digit Ephemeral Pairing & QR Codes**: Generated via Web Crypto API CSPRNG rejection sampling with automated self-destruction after 1 hour (default, configurable from 15m to 4h).
 - **Multi-File Staging & Drag-and-Drop**: Supports folder drag-and-drop, native file selection, and clipboard paste (`Ctrl+V` / `⌘+V`) for screenshots and files.
-- **NAT Traversal with Public STUN**: Uses Google and Cloudflare public STUN servers for direct UDP hole punching across standard residential and mobile networks.
+- **NAT Traversal with Public STUN**: Uses Google and Cloudflare public STUN servers for direct UDP hole punching across residential and mobile networks.
+- **Cloudflare Workers KV Signaling**: Lightning-fast cross-edge signaling coordination with dedicated mailboxes to prevent message collisions.
 - **Custom Frontend Design System**: Dark futuristic aesthetic, JetBrains Mono telemetry typography, live status badges, dynamic countdown timers, and responsive layout.
 
 ---
@@ -54,7 +56,7 @@ The signaling server (`/api/signal/*`) coordinates connection establishment by e
 - Interactive Connectivity Establishment (ICE) candidate IP/port pairs.
 - Session leave/disconnect signals.
 
-Signaling sessions self-destruct after 15 minutes. **File payloads never touch the signaling server.**
+Signaling sessions self-destruct after 1 hour (configurable up to 4 hours). **File payloads never touch the signaling server.**
 
 ### 2. NAT Traversal & Connectivity
 - **Public STUN**: Enables peers behind residential NATs to discover their reflexive public endpoints and establish direct UDP connections.
@@ -122,14 +124,16 @@ npm run build
 
 ## 🌐 Production Deployment
 
-GhostShare can be hosted on any Node.js hosting platform, VPS, or serverless provider (Vercel, Cloudflare Workers via OpenNext, Netlify, Docker, etc.).
+- **Live Application**: [https://ghostshare.shshmichael020.workers.dev](https://ghostshare.shshmichael020.workers.dev)
+- **GitHub Repository**: [https://github.com/shshmichael020-alt/ghostshare](https://github.com/shshmichael020-alt/ghostshare)
 
-Because GhostShare uses WebRTC direct peer-to-peer transfers:
-- **No cloud storage buckets** (R2, B2, S3) are needed.
-- **No payment card or billing information** is required.
-- **Zero file bandwidth costs** are incurred by the hosting provider during transfers.
+GhostShare is deployed on **Cloudflare Workers (100% Free Plan)** using OpenNext:
+- **Zero cloud storage buckets** (no R2, B2, or S3 needed).
+- **Zero payment cards** or billing accounts required.
+- **Zero file bandwidth costs** incurred by the server during peer transfers.
+- **Workers KV** (`SESSIONS_KV`) coordinates signaling mailboxes globally across Cloudflare edge PoPs.
 
-To deploy on Cloudflare Workers (optional):
+To deploy updates to Cloudflare Workers:
 ```bash
 npm run deploy
 ```
