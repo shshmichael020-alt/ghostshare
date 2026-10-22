@@ -3,27 +3,83 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 type Env = Record<string, string | undefined>;
 
-export async function getR2Client() {
+export interface StorageConfig {
+  client: AwsClient;
+  bucket: string;
+  baseUrl: string;
+  accountId?: string;
+}
+
+function extractRegion(endpoint: string): string {
+  const match = endpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/i);
+  return match ? match[1] : "auto";
+}
+
+/**
+ * Initializes S3-compatible client supporting Backblaze B2 (Free 10GB, No Card)
+ * or Cloudflare R2 seamlessly.
+ */
+export async function getStorageClient(): Promise<StorageConfig> {
   const { env } = await getCloudflareContext({ async: true });
   const e = env as Env;
-  const accountId = e.R2_ACCOUNT_ID;
-  const accessKeyId = e.R2_ACCESS_KEY_ID;
-  const secretAccessKey = e.R2_SECRET_ACCESS_KEY;
-  const bucket = e.R2_BUCKET_NAME;
 
-  if (!accountId || !accessKeyId || !secretAccessKey || !bucket) {
-    throw new Error(
-      "R2 is not configured yet — set R2_ACCOUNT_ID, R2_BUCKET_NAME (vars) and R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (secrets).",
-    );
+  // 1. Check Backblaze B2 / Generic S3 configuration
+  const s3Endpoint = e.S3_ENDPOINT || e.B2_ENDPOINT;
+  const accessKeyId = e.S3_ACCESS_KEY_ID || e.B2_APPLICATION_KEY_ID || e.R2_ACCESS_KEY_ID;
+  const secretAccessKey = e.S3_SECRET_ACCESS_KEY || e.B2_APPLICATION_KEY || e.R2_SECRET_ACCESS_KEY;
+  const bucket = e.S3_BUCKET_NAME || e.B2_BUCKET_NAME || e.R2_BUCKET_NAME || "ghostshare-files";
+  const s3Region = e.S3_REGION || e.B2_REGION || (s3Endpoint ? extractRegion(s3Endpoint) : "auto");
+
+  // 2. Check Cloudflare R2 fallback
+  const accountId = e.R2_ACCOUNT_ID;
+
+  if (s3Endpoint && accessKeyId && secretAccessKey) {
+    const cleanEndpoint = s3Endpoint.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    const client = new AwsClient({
+      accessKeyId,
+      secretAccessKey,
+      service: "s3",
+      region: s3Region || "auto",
+    });
+    return {
+      client,
+      bucket,
+      baseUrl: `https://${cleanEndpoint}/${bucket}`,
+    };
   }
 
-  const client = new AwsClient({ accessKeyId, secretAccessKey, service: "s3", region: "auto" });
-  return { client, accountId, bucket };
+  if (accountId && accessKeyId && secretAccessKey) {
+    const client = new AwsClient({ accessKeyId, secretAccessKey, service: "s3", region: "auto" });
+    return {
+      client,
+      bucket,
+      accountId,
+      baseUrl: `https://${accountId}.r2.cloudflarestorage.com/${bucket}`,
+    };
+  }
+
+  throw new Error(
+    "Storage is not configured yet. Configure Backblaze B2 (S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY) or Cloudflare R2.",
+  );
+}
+
+// Backwards compatibility alias
+export async function getR2Client() {
+  const cfg = await getStorageClient();
+  return { client: cfg.client, accountId: cfg.accountId || "", bucket: cfg.bucket };
 }
 
 export function objectUrl(accountId: string, bucket: string, objectKey: string): URL {
   const encodedKey = objectKey.split("/").map(encodeURIComponent).join("/");
-  return new URL(`https://${accountId}.r2.cloudflarestorage.com/${bucket}/${encodedKey}`);
+  if (accountId) {
+    return new URL(`https://${accountId}.r2.cloudflarestorage.com/${bucket}/${encodedKey}`);
+  }
+  return new URL(`https://s3.backblazeb2.com/${bucket}/${encodedKey}`);
+}
+
+export function buildStorageUrl(baseUrl: string, objectKey: string): URL {
+  const encodedKey = objectKey.split("/").map(encodeURIComponent).join("/");
+  return new URL(`${baseUrl}/${encodedKey}`);
 }
 
 /**
@@ -52,7 +108,7 @@ export function buildContentDisposition(downloadFilename: string): string {
 }
 
 /**
- * Builds a collision-resistant internal R2 object key using cryptographically secure random bytes.
+ * Builds a collision-resistant internal storage object key using cryptographically secure random bytes.
  */
 export function buildObjectKey(code: string, originalName: string): string {
   const randomBytes = new Uint8Array(8);
@@ -64,11 +120,11 @@ export function buildObjectKey(code: string, originalName: string): string {
 }
 
 /**
- * Generates a presigned PUT URL allowing direct browser-to-R2 upload without Worker body proxying.
+ * Generates a presigned PUT URL allowing direct browser-to-storage upload without Worker body proxying.
  */
 export async function createPresignedPut(objectKey: string, expiresInSeconds = 3600): Promise<string> {
-  const { client, accountId, bucket } = await getR2Client();
-  const url = objectUrl(accountId, bucket, objectKey);
+  const { client, baseUrl } = await getStorageClient();
+  const url = buildStorageUrl(baseUrl, objectKey);
   url.searchParams.set("X-Amz-Expires", String(expiresInSeconds));
   const signed = await client.sign(url, { method: "PUT", aws: { signQuery: true } });
   return signed.url;
@@ -82,8 +138,8 @@ export async function createPresignedGet(
   downloadFilename: string,
   expiresInSeconds: number,
 ): Promise<string> {
-  const { client, accountId, bucket } = await getR2Client();
-  const url = objectUrl(accountId, bucket, objectKey);
+  const { client, baseUrl } = await getStorageClient();
+  const url = buildStorageUrl(baseUrl, objectKey);
   url.searchParams.set("X-Amz-Expires", String(Math.max(60, expiresInSeconds)));
   url.searchParams.set("response-content-disposition", buildContentDisposition(downloadFilename));
   const signed = await client.sign(url, { method: "GET", aws: { signQuery: true } });
@@ -91,12 +147,12 @@ export async function createPresignedGet(
 }
 
 /**
- * Verifies that an object was genuinely uploaded to R2 and confirms its actual size via S3 HEAD.
+ * Verifies that an object was genuinely uploaded to storage and confirms its actual size via S3 HEAD.
  */
 export async function verifyR2Object(objectKey: string): Promise<{ exists: boolean; size?: number }> {
   try {
-    const { client, accountId, bucket } = await getR2Client();
-    const url = objectUrl(accountId, bucket, objectKey);
+    const { client, baseUrl } = await getStorageClient();
+    const url = buildStorageUrl(baseUrl, objectKey);
     const signed = await client.sign(url, { method: "HEAD" });
     const res = await client.fetch(signed);
 
@@ -107,8 +163,7 @@ export async function verifyR2Object(objectKey: string): Promise<{ exists: boole
     }
     return { exists: false };
   } catch (err) {
-    console.error("verifyR2Object error:", err);
-    // If credentials or bindings are not configured (e.g. local dev mock), return false
+    console.error("verifyStorageObject error:", err);
     return { exists: false };
   }
 }

@@ -18,9 +18,15 @@
     }
   ],
 
-  // Non-secret vars. Set the real values with `wrangler secret put <NAME>`
-  // instead of here for anything sensitive (access key, secret key).
+  // Non-secret vars. Set sensitive keys with `npx wrangler secret put <NAME>`.
   "vars": {
+    // Backblaze B2 (Free 10 GB, No Credit Card Required):
+    // Enter the S3 Endpoint shown in your B2 bucket details:
+    "S3_ENDPOINT": "s3.us-east-005.backblazeb2.com",
+    "S3_REGION": "us-east-005",
+    "S3_BUCKET_NAME": "ghostshare-files",
+
+    // Cloudflare R2 fallback (if using Cloudflare R2 instead):
     "R2_ACCOUNT_ID": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
     "R2_BUCKET_NAME": "ghostshare-files"
   }
