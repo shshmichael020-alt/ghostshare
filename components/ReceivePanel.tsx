@@ -13,6 +13,7 @@ import {
   createPeerConnection,
   sendSignalMessage,
   fetchSignalMessages,
+  waitForIceGathering,
   TransferManifestFile,
   WebRTCMessage,
 } from "@/lib/webrtc";
@@ -304,12 +305,16 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               const answer = await pc.createAnswer();
               await pc.setLocalDescription(answer);
 
+              // Wait for STUN/TURN ICE candidates to gather directly into SDP
+              await waitForIceGathering(pc, 1500);
+              const finalAnswer = pc.localDescription || answer;
+
               await sendSignalMessage(
                 currentCode,
                 "receiver",
                 "sender",
                 "answer",
-                answer,
+                finalAnswer,
               );
             } else if (msg.type === "candidate") {
               const candidate = msg.data as RTCIceCandidateInit;
@@ -688,11 +693,11 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 </div>
               </div>
 
-              <div className="mt-6 pt-4 flex items-center gap-2 text-on-surface-variant border-t border-white/[0.06]">
-                <Info size={16} className="text-secondary shrink-0" />
-                <p className="font-body-sm">
-                  Enter this temporary code into GhostShare on the sending device or scan the QR code to pair.
-                </p>
+              <div className="mt-6 p-3.5 rounded-xl bg-secondary/10 border border-secondary/20 flex items-start gap-2.5 text-on-surface">
+                <Info size={18} className="text-secondary shrink-0 mt-0.5" />
+                <div className="text-xs sm:text-sm font-body-sm text-on-surface-variant">
+                  <span className="font-semibold text-secondary">Keep this screen open:</span> Open GhostShare on your other device, switch to <strong className="text-on-surface underline">Send Files</strong>, and enter this 8-digit code (or scan the QR code).
+                </div>
               </div>
             </div>
 

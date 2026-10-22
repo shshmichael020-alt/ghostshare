@@ -11,6 +11,7 @@ import {
   createPeerConnection,
   sendSignalMessage,
   fetchSignalMessages,
+  waitForIceGathering,
   streamFileOverDataChannel,
   triggerIceRestart,
   WebRTCMessage,
@@ -61,6 +62,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSignalTimestamp = useRef<number>(0);
   const cancelTransferRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -69,6 +71,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
   // Reset and disconnect WebRTC & signaling
   const disconnectSession = useCallback(() => {
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
     if (pollRef.current) clearInterval(pollRef.current);
     if (dcRef.current) {
       dcRef.current.close();
@@ -135,6 +141,8 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           triggerIceRestart(pc, codeToConnect, "sender", "receiver");
         } else if (pc.iceConnectionState === "failed") {
           setConnStatus("disconnected");
+          setChecking(false);
+          if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
           setNatWarning(
             "Direct P2P UDP connection could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
           );
@@ -147,6 +155,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       dc.binaryType = "arraybuffer";
 
       dc.onopen = () => {
+        if (connectTimeoutRef.current) {
+          clearTimeout(connectTimeoutRef.current);
+          connectTimeoutRef.current = null;
+        }
         setConnStatus("connected");
         setChecking(false);
         push("Direct P2P tunnel established with Recipient", "success");
@@ -183,11 +195,22 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         }
       };
 
-      // 5. Create & send SDP offer
+      // 5. Create & gather SDP offer with full candidates
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc, 1500);
 
-      await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", offer);
+      const finalOffer = pc.localDescription || offer;
+      await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", finalOffer);
+
+      // 6. Safety timeout: cancel if handshake does not complete within 25 seconds
+      connectTimeoutRef.current = setTimeout(() => {
+        if (dcRef.current?.readyState !== "open") {
+          setChecking(false);
+          setCodeError("Connection timed out. Please ensure the other device is open on the 'Receive Files' screen with this code.");
+          disconnectSession();
+        }
+      }, 25000);
 
       // 6. Start signaling poll loop
       pollRef.current = setInterval(async () => {
@@ -441,6 +464,16 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             </button>
           </div>
 
+          {/* Instruction banner */}
+          <div className="p-3.5 rounded-xl bg-surface-container-high border border-white/[0.06] flex items-start gap-2.5 text-xs sm:text-sm font-body-sm text-on-surface-variant">
+            <Radio size={16} className="text-secondary shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold text-on-surface">Step 1:</span> Open GhostShare on the other device and stay on <span className="text-secondary font-medium">Receive Files</span>.
+              <br />
+              <span className="font-semibold text-on-surface">Step 2:</span> Enter that device&apos;s 8-digit code below to establish the direct bridge.
+            </div>
+          </div>
+
           {/* Segmented Pin Input Component */}
           <PinInput
             value={codeInput}
@@ -476,6 +509,19 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               {checking ? <Loader2 size={18} className="animate-spin" /> : null}
               <span>{checking ? "Negotiating WebRTC Bridge..." : "Connect Recipient"}</span>
             </button>
+
+            {checking && (
+              <button
+                type="button"
+                onClick={() => {
+                  disconnectSession();
+                  setChecking(false);
+                }}
+                className="py-3 px-4 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-sm font-body-sm transition-colors cursor-pointer border border-white/[0.08]"
+              >
+                Cancel
+              </button>
+            )}
 
             <button
               type="button"

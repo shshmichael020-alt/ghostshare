@@ -165,6 +165,8 @@ export async function postSignalMessage(
     try {
       const ttl = Math.max(60, Math.round((session.expiresAt - Date.now()) / 1000));
       await kv.put(`session:${code}`, JSON.stringify(session), { expirationTtl: ttl });
+      // Also write directly to target's dedicated mailbox for immediate cross-PoP delivery
+      await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
     } catch (err) {
       console.warn("KV post message error:", err);
     }
@@ -179,11 +181,30 @@ export async function pollSignalMessages(
   sinceTimestamp: number,
 ): Promise<SignalMessage[]> {
   const session = await getSignalingSession(code);
-  if (!session) return [];
+  const foundMessages = new Map<string, SignalMessage>();
 
-  return session.messages.filter(
-    (m) => m.target === forRole && m.timestamp > sinceTimestamp,
-  );
+  if (session) {
+    for (const m of session.messages) {
+      if (m.target === forRole && m.timestamp > sinceTimestamp) {
+        foundMessages.set(m.id, m);
+      }
+    }
+  }
+
+  // Also check target role's dedicated mailbox in KV
+  const kv = getKvBinding();
+  if (kv) {
+    try {
+      const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
+      if (directMsg && directMsg.timestamp > sinceTimestamp) {
+        foundMessages.set(directMsg.id, directMsg);
+      }
+    } catch {
+      // ignored
+    }
+  }
+
+  return Array.from(foundMessages.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export async function closeSignalingSession(code: string): Promise<void> {
