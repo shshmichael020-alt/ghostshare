@@ -80,6 +80,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSignalTimestamp = useRef<number>(0);
+  const codeRef = useRef<string | null>(null);
+  const hasMountedRef = useRef<boolean>(false);
 
   // Active OPFS/stream sink for zero-RAM direct-to-disk streaming
   const activeSinkRef = useRef<OpfsFileStreamer | null>(null);
@@ -141,7 +143,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
             // Stream directly onto local disk/OPFS
             activeSinkRef.current = await createIncomingFileSink(
-              code || "default",
+              codeRef.current || "default",
               msg.name,
               msg.mimeType,
               startOffset,
@@ -212,10 +214,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         }
       }
     };
-  }, [code, push]);
+  }, [push]);
 
   // Initialize a new receiving session and peer connection
-  const startSession = useCallback(async (selectedTtl: number = initialTtl) => {
+  const startSession = useCallback(async (selectedTtl: number = DEFAULT_TTL_SECONDS) => {
     cleanupConnection();
     setError(null);
     setNatWarning(null);
@@ -223,6 +225,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     setReceivedFiles([]);
     setPendingApproval(null);
     setActiveReceiving(null);
+    codeRef.current = null;
     setCode(null);
     setRemaining(null);
     setConnStatus("idle");
@@ -242,6 +245,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       }
       const data = (await res.json()) as { code: string; expiresAt: number };
       const currentCode = data.code;
+      codeRef.current = currentCode;
       setCode(currentCode);
       const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
       setRemaining(rem);
@@ -327,15 +331,14 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       setError((e as Error).message);
       setConnStatus("failed");
     }
-  }, [cleanupConnection, initialTtl, setupDataChannel, push]);
+  }, [cleanupConnection, setupDataChannel, push]);
 
-  // Initialize session on mount
+  // Initialize session on mount (guarded to run once)
   useEffect(() => {
-    const timer = setTimeout(() => {
-      startSession();
-    }, 0);
+    if (hasMountedRef.current) return;
+    hasMountedRef.current = true;
+    startSession(DEFAULT_TTL_SECONDS);
     return () => {
-      clearTimeout(timer);
       cleanupConnection();
     };
   }, [startSession, cleanupConnection]);

@@ -6,7 +6,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 export async function POST(request: Request) {
   try {
     const ip = getClientIp(request);
-    const rl = checkRateLimit("session_create", ip, 20, 60_000);
+    const rl = checkRateLimit("session_create", ip, 80, 60_000);
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many session creation requests. Please wait a moment." },
