@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { postSignalMessage, SignalingStorageNamespace, SignalMessage } from "@/lib/signalStore";
-import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
+import {
+  postSignalMessage,
+  checkCrossIsolateRateLimit,
+  SignalingStorageNamespace,
+  SignalMessage,
+} from "@/lib/signalStore";
+import { getClientIp } from "@/lib/rateLimit";
 
 const ALLOWED_TYPES = new Set<SignalMessage["type"]>([
   "offer",
@@ -14,6 +19,17 @@ const ALLOWED_TYPES = new Set<SignalMessage["type"]>([
 
 const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB max payload size for signaling JSON
 
+function extractBearer(request: Request, bodyToken?: string): string | undefined {
+  if (bodyToken && typeof bodyToken === "string" && bodyToken.trim().length > 0) {
+    return bodyToken.trim();
+  }
+  const auth = request.headers.get("authorization");
+  if (auth && auth.toLowerCase().startsWith("bearer ")) {
+    return auth.slice(7).trim();
+  }
+  return undefined;
+}
+
 export async function POST(request: Request) {
   try {
     let binding: SignalingStorageNamespace | undefined;
@@ -23,8 +39,8 @@ export async function POST(request: Request) {
     } catch {}
 
     const ip = getClientIp(request);
-    const rl = checkRateLimit("signal_post", ip, 240, 60_000);
-    if (!rl.success) {
+    const rl = await checkCrossIsolateRateLimit("signal_post", ip, 240, 60_000, binding);
+    if (!rl.allowed) {
       return NextResponse.json(
         { error: "Too many signaling messages. Throttled." },
         { status: 429, headers: { "Retry-After": String(rl.reset) } },
@@ -42,6 +58,7 @@ export async function POST(request: Request) {
       target?: unknown;
       type?: unknown;
       data?: unknown;
+      token?: unknown;
     };
     try {
       parsed = JSON.parse(bodyText);
@@ -50,6 +67,7 @@ export async function POST(request: Request) {
     }
 
     const { code, sender, target, type, data } = parsed;
+    const token = extractBearer(request, typeof parsed.token === "string" ? parsed.token : undefined);
 
     if (
       typeof code !== "string" ||
@@ -62,17 +80,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Malformed signal message parameters" }, { status: 400 });
     }
 
-    const posted = await postSignalMessage(
+    if (!token) {
+      return NextResponse.json(
+        { error: "Unauthorized: Missing participant capability token" },
+        { status: 401 },
+      );
+    }
+
+    const result = await postSignalMessage(
       code,
       sender as "receiver" | "sender",
       target as "receiver" | "sender",
       type as SignalMessage["type"],
       data,
+      token,
       binding,
     );
 
-    if (!posted) {
-      return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error || "Failed to post message" }, { status: result.status });
     }
 
     return NextResponse.json({ ok: true });

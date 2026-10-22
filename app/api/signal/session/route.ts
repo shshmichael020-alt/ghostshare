@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateUniqueCode } from "@/lib/codes";
-import { createSignalingSession, SignalingStorageNamespace } from "@/lib/signalStore";
-import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
+import { createSignalingSession, checkCrossIsolateRateLimit, SignalingStorageNamespace } from "@/lib/signalStore";
+import { getClientIp } from "@/lib/rateLimit";
 import { DEFAULT_TTL_SECONDS, isValidTtl } from "@/lib/constants";
 
 export async function POST(request: Request) {
@@ -14,8 +14,8 @@ export async function POST(request: Request) {
     } catch {}
 
     const ip = getClientIp(request);
-    const rl = checkRateLimit("session_create", ip, 40, 60_000);
-    if (!rl.success) {
+    const rl = await checkCrossIsolateRateLimit("session_create", ip, 40, 60_000, binding);
+    if (!rl.allowed) {
       return NextResponse.json(
         { error: "Too many session creation requests. Please wait a moment." },
         { status: 429, headers: { "Retry-After": String(rl.reset) } },

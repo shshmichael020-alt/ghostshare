@@ -251,11 +251,12 @@ export async function triggerIceRestart(
   code: string,
   sender: "sender" | "receiver",
   target: "sender" | "receiver",
+  token?: string,
 ): Promise<boolean> {
   try {
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
-    return await sendSignalMessage(code, sender, target, "offer", offer);
+    return await sendSignalMessage(code, sender, target, "offer", offer, token);
   } catch (err) {
     console.warn("ICE restart initiation failed:", err);
     return false;
@@ -263,7 +264,7 @@ export async function triggerIceRestart(
 }
 
 /**
- * Helper to post signaling message to API
+ * Helper to post signaling message to API with participant capability authentication
  */
 export async function sendSignalMessage(
   code: string,
@@ -271,12 +272,17 @@ export async function sendSignalMessage(
   target: "receiver" | "sender",
   type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave",
   data: unknown,
+  token?: string,
 ): Promise<boolean> {
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
     const res = await fetch("/api/signal/message", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, sender, target, type, data }),
+      headers,
+      body: JSON.stringify({ code, sender, target, type, data, token }),
     });
     return res.ok;
   } catch {
@@ -285,24 +291,53 @@ export async function sendSignalMessage(
 }
 
 /**
- * Helper to poll signaling messages from API
+ * Helper to poll signaling messages from API strictly greater than sequence cursor
  */
 export async function fetchSignalMessages(
   code: string,
   role: "receiver" | "sender",
-  since: number,
-): Promise<Array<{ id: string; sender: string; target: string; type: string; data: unknown; timestamp: number }>> {
+  sinceSeq: number,
+  token?: string,
+): Promise<{
+  messages: Array<{
+    seq?: number;
+    id: string;
+    sender: string;
+    target: string;
+    type: string;
+    data: unknown;
+    timestamp: number;
+  }>;
+  cursor: number;
+}> {
   try {
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
     const res = await fetch(
-      `/api/signal/poll?code=${encodeURIComponent(code)}&role=${role}&since=${since}`,
-      { cache: "no-store" },
+      `/api/signal/poll?code=${encodeURIComponent(code)}&role=${role}&since=${sinceSeq}${tokenQuery}`,
+      { cache: "no-store", headers },
     );
-    if (!res.ok) return [];
+    if (!res.ok) return { messages: [], cursor: sinceSeq };
     const json = (await res.json()) as {
-      messages?: Array<{ id: string; sender: string; target: string; type: string; data: unknown; timestamp: number }>;
+      messages?: Array<{
+        seq?: number;
+        id: string;
+        sender: string;
+        target: string;
+        type: string;
+        data: unknown;
+        timestamp: number;
+      }>;
+      cursor?: number;
     };
-    return json.messages || [];
+    return {
+      messages: json.messages || [],
+      cursor: typeof json.cursor === "number" ? json.cursor : sinceSeq,
+    };
   } catch {
-    return [];
+    return { messages: [], cursor: sinceSeq };
   }
 }

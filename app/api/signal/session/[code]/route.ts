@@ -5,9 +5,10 @@ import {
   joinSignalingSession,
   updateSessionTtl,
   closeSignalingSession,
+  checkCrossIsolateRateLimit,
   SignalingStorageNamespace,
 } from "@/lib/signalStore";
-import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
+import { getClientIp } from "@/lib/rateLimit";
 import { isValidTtl } from "@/lib/constants";
 
 function getBinding(): SignalingStorageNamespace | undefined {
@@ -19,6 +20,17 @@ function getBinding(): SignalingStorageNamespace | undefined {
   }
 }
 
+function extractBearer(request: Request, bodyToken?: string): string | undefined {
+  if (bodyToken && typeof bodyToken === "string" && bodyToken.trim().length > 0) {
+    return bodyToken.trim();
+  }
+  const auth = request.headers.get("authorization");
+  if (auth && auth.toLowerCase().startsWith("bearer ")) {
+    return auth.slice(7).trim();
+  }
+  return undefined;
+}
+
 export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
   const { code } = await params;
 
@@ -27,8 +39,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
   }
 
   const ip = getClientIp(request);
-  const rl = checkRateLimit("session_check", ip, 120, 60_000);
-  if (!rl.success) {
+  const binding = getBinding();
+  const rl = await checkCrossIsolateRateLimit("session_check", ip, 120, 60_000, binding);
+  if (!rl.allowed) {
     return NextResponse.json(
       { error: "Too many requests. Please wait a moment." },
       { status: 429, headers: { "Retry-After": String(rl.reset) } },
@@ -36,7 +49,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
   }
 
   try {
-    const binding = getBinding();
     const session = await getSignalingSession(code, binding);
 
     if (!session) {
@@ -85,8 +97,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
   }
 
   const ip = getClientIp(request);
-  const rl = checkRateLimit("session_join", ip, 60, 60_000);
-  if (!rl.success) {
+  const binding = getBinding();
+  const rl = await checkCrossIsolateRateLimit("session_join", ip, 60, 60_000, binding);
+  if (!rl.allowed) {
     return NextResponse.json(
       { error: "Too many join attempts. Please wait a moment." },
       { status: 429, headers: { "Retry-After": String(rl.reset) } },
@@ -94,13 +107,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
   }
 
   try {
-    const binding = getBinding();
-    const success = await joinSignalingSession(code, binding);
-    if (!success) {
-      return NextResponse.json({ error: "Pairing code not found or expired" }, { status: 404 });
+    let senderToken: string | undefined;
+    try {
+      const body = (await request.json()) as { senderToken?: string };
+      senderToken = body?.senderToken;
+    } catch {}
+
+    const result = await joinSignalingSession(code, senderToken, binding);
+    if (!result.ok) {
+      return NextResponse.json(
+        { error: result.error || "Could not join session" },
+        { status: result.status },
+      );
     }
 
-    return NextResponse.json({ ok: true, code });
+    return NextResponse.json({ ok: true, code, senderToken: result.senderToken });
   } catch (err) {
     console.error("Session join error:", err);
     return NextResponse.json(
@@ -119,7 +140,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
 
   try {
     const body = (await request.json()) as { ttlSeconds?: unknown; receiverToken?: string };
-    const { ttlSeconds, receiverToken } = body;
+    const { ttlSeconds } = body;
+    const token = extractBearer(request, body.receiverToken);
 
     if (!isValidTtl(ttlSeconds)) {
       return NextResponse.json(
@@ -128,7 +150,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
       );
     }
 
-    if (!receiverToken || typeof receiverToken !== "string") {
+    if (!token) {
       return NextResponse.json(
         { error: "Missing or invalid receiverToken capability" },
         { status: 401 },
@@ -136,7 +158,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
     }
 
     const binding = getBinding();
-    const result = await updateSessionTtl(code, ttlSeconds, receiverToken, binding);
+    const result = await updateSessionTtl(code, ttlSeconds, token, binding);
     if (!result.ok) {
       return NextResponse.json({ error: "Session not found or expired" }, { status: 404 });
     }
@@ -164,16 +186,37 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ c
   }
 
   try {
-    let receiverToken: string | undefined;
+    let bodyToken: string | undefined;
     try {
       const body = (await request.json()) as { receiverToken?: string };
-      receiverToken = body?.receiverToken;
+      bodyToken = body?.receiverToken;
     } catch {}
 
+    const token = extractBearer(request, bodyToken);
+
+    // Enforce required receiver capability token
+    if (!token) {
+      return NextResponse.json(
+        { error: "Unauthorized: Missing receiverToken capability" },
+        { status: 401 },
+      );
+    }
+
     const binding = getBinding();
-    await closeSignalingSession(code, receiverToken, binding);
+    const res = await closeSignalingSession(code, token, binding);
+
+    if (!res.ok) {
+      return NextResponse.json(
+        { error: res.error || "Failed to close session" },
+        { status: res.status },
+      );
+    }
+
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json({ error: "Failed to close session", details: (err as Error).message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to close session", details: (err as Error).message },
+      { status: 500 },
+    );
   }
 }

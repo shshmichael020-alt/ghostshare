@@ -66,7 +66,6 @@ test("WebRTC Protocol: serializes and parses control messages cleanly", () => {
 test("Signaling Store: session lifecycle, joining, posting, and role-filtered polling", async () => {
   setTestStorageNamespace(createInMemoryTestNamespace());
   const testCode = "99887766";
-  await closeSignalingSession(testCode);
 
   // 1. Create session with 1-hour (3600s) default TTL and receive receiver capability token
   const { session, receiverToken } = await createSignalingSession(testCode);
@@ -90,45 +89,64 @@ test("Signaling Store: session lifecycle, joining, posting, and role-filtered po
   assert.ok(fetched !== null);
   assert.equal(fetched.code, testCode);
 
-  // 3. Sender joins
-  const joined = await joinSignalingSession(testCode);
-  assert.equal(joined, true);
+  // 3. Sender joins and receives dedicated sender capability token
+  const joinResult = await joinSignalingSession(testCode);
+  assert.equal(joinResult.ok, true);
+  const senderToken = joinResult.senderToken!;
+  assert.ok(typeof senderToken === "string" && senderToken.length >= 16);
   const afterJoin = await getSignalingSession(testCode);
   assert.equal(afterJoin?.senderActive, true);
 
-  // 4. Post signaling message from Sender to Receiver (e.g. SDP offer)
-  const posted = await postSignalMessage(testCode, "sender", "receiver", "offer", {
-    type: "offer",
-    sdp: "v=0\r\no=...",
-  });
-  assert.equal(posted, true);
+  // 4. Post signaling message from Sender to Receiver (e.g. SDP offer) authenticated by senderToken
+  const postResult = await postSignalMessage(
+    testCode,
+    "sender",
+    "receiver",
+    "offer",
+    {
+      type: "offer",
+      sdp: "v=0\r\no=...",
+    },
+    senderToken,
+  );
+  assert.equal(postResult.ok, true);
 
-  // 5. Receiver polls and receives the offer
-  const receiverMsgs = await pollSignalMessages(testCode, "receiver", 0);
-  assert.equal(receiverMsgs.length, 1);
-  assert.equal(receiverMsgs[0].type, "offer");
-  assert.equal(receiverMsgs[0].sender, "sender");
-  assert.equal(receiverMsgs[0].target, "receiver");
+  // 5. Receiver polls and receives the offer authenticated by receiverToken
+  const receiverPoll = await pollSignalMessages(testCode, "receiver", 0, receiverToken);
+  assert.equal(receiverPoll.messages.length, 1);
+  assert.equal(receiverPoll.messages[0].type, "offer");
+  assert.equal(receiverPoll.messages[0].sender, "sender");
+  assert.equal(receiverPoll.messages[0].target, "receiver");
+  const offerSeq = receiverPoll.cursor;
 
   // 6. Sender polls for messages targeted to sender (should be empty so far)
-  const senderMsgs = await pollSignalMessages(testCode, "sender", 0);
-  assert.equal(senderMsgs.length, 0);
+  const senderPoll = await pollSignalMessages(testCode, "sender", 0, senderToken);
+  assert.equal(senderPoll.messages.length, 0);
 
-  // 7. Receiver posts answer back to sender
-  await postSignalMessage(testCode, "receiver", "sender", "answer", {
-    type: "answer",
-    sdp: "v=0\r\no=...",
-  });
-  const senderMsgsAfterAnswer = await pollSignalMessages(testCode, "sender", 0);
-  assert.equal(senderMsgsAfterAnswer.length, 1);
-  assert.equal(senderMsgsAfterAnswer[0].type, "answer");
+  // 7. Receiver posts answer back to sender authenticated by receiverToken
+  const answerPost = await postSignalMessage(
+    testCode,
+    "receiver",
+    "sender",
+    "answer",
+    {
+      type: "answer",
+      sdp: "v=0\r\no=...",
+    },
+    receiverToken,
+  );
+  assert.equal(answerPost.ok, true);
 
-  // 8. Polling with timestamp filters out older messages
-  const since = receiverMsgs[0].timestamp;
-  const noNewMsgs = await pollSignalMessages(testCode, "receiver", since);
-  assert.equal(noNewMsgs.length, 0);
+  const senderPollAfterAnswer = await pollSignalMessages(testCode, "sender", 0, senderToken);
+  assert.equal(senderPollAfterAnswer.messages.length, 1);
+  assert.equal(senderPollAfterAnswer.messages[0].type, "answer");
 
-  // 9. Close session
-  await closeSignalingSession(testCode);
+  // 8. Polling with sequence cursor filters out older messages
+  const noNewMsgs = await pollSignalMessages(testCode, "receiver", offerSeq, receiverToken);
+  assert.equal(noNewMsgs.messages.length, 0);
+
+  // 9. Close session with receiverToken
+  const closeRes = await closeSignalingSession(testCode, receiverToken);
+  assert.equal(closeRes.ok, true);
   assert.equal(await getSignalingSession(testCode), null);
 });

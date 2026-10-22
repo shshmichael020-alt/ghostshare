@@ -80,7 +80,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastSignalTimestamp = useRef<number>(0);
+  const lastSignalSeq = useRef<number>(0);
   const codeRef = useRef<string | null>(null);
   const receiverTokenRef = useRef<string | null>(null);
   const hasMountedRef = useRef<boolean>(false);
@@ -278,7 +278,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     setCode(null);
     setRemaining(null);
     setConnStatus("idle");
-    lastSignalTimestamp.current = 0;
+    lastSignalSeq.current = 0;
 
     try {
       // 1. Create signaling session with requested TTL (default 1 hour = 3600s)
@@ -314,7 +314,14 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         if (outgoingCandidates.length > 0) {
           const batch = [...outgoingCandidates];
           outgoingCandidates.length = 0;
-          sendSignalMessage(currentCode, "receiver", "sender", "candidate-batch", batch);
+          sendSignalMessage(
+            currentCode,
+            "receiver",
+            "sender",
+            "candidate-batch",
+            batch,
+            receiverTokenRef.current || undefined,
+          );
         }
       };
 
@@ -350,18 +357,21 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         setupDataChannel(event.channel);
       };
 
-      // 3. Start signaling poll loop
+      // 3. Start signaling poll loop with monotonic sequence cursor
       pollRef.current = setInterval(async () => {
         try {
-          const messages = await fetchSignalMessages(
+          const pollRes = await fetchSignalMessages(
             currentCode,
             "receiver",
-            lastSignalTimestamp.current,
+            lastSignalSeq.current,
+            receiverTokenRef.current || undefined,
           );
 
-          for (const msg of messages) {
-            lastSignalTimestamp.current = Math.max(lastSignalTimestamp.current, msg.timestamp);
+          if (pollRes.cursor > lastSignalSeq.current) {
+            lastSignalSeq.current = pollRes.cursor;
+          }
 
+          for (const msg of pollRes.messages) {
             if (msg.type === "offer") {
               if (hasAnsweredRef.current || pc.signalingState !== "stable") {
                 continue;
@@ -398,6 +408,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 "sender",
                 "answer",
                 finalAnswer,
+                receiverTokenRef.current || undefined,
               );
             } else if (msg.type === "candidate-batch" || msg.type === "candidate") {
               const cands: RTCIceCandidateInit[] =

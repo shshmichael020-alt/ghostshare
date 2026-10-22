@@ -68,7 +68,8 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSignalTimestamp = useRef<number>(0);
+  const lastSignalSeq = useRef<number>(0);
+  const senderTokenRef = useRef<string | null>(null);
   const cancelTransferRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
@@ -134,18 +135,27 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         return false;
       }
 
-      // 2. Join session
-      const joinRes = await fetch(`/api/signal/session/${codeToConnect}`, { method: "POST" });
+      // 2. Join session and obtain authorized sender capability token
+      const joinRes = await fetch(`/api/signal/session/${codeToConnect}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderToken: senderTokenRef.current }),
+      });
       if (!joinRes.ok) {
-        setCodeError("Could not join pairing session. Please try again.");
+        const joinErr = (await joinRes.json().catch(() => ({}))) as { error?: string };
+        setCodeError(joinErr.error || "Could not join pairing session. Please try again.");
         setChecking(false);
         isConnectingRef.current = false;
         return false;
       }
+      const joinData = (await joinRes.json()) as { ok: boolean; senderToken?: string };
+      if (joinData.senderToken) {
+        senderTokenRef.current = joinData.senderToken;
+      }
 
       setLinkedCode(codeToConnect);
       setConnStatus("connecting");
-      lastSignalTimestamp.current = 0;
+      lastSignalSeq.current = 0;
 
       // 3. Create WebRTC Peer Connection
       const pc = createPeerConnection();
@@ -159,7 +169,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         if (outgoingCandidates.length > 0) {
           const batch = [...outgoingCandidates];
           outgoingCandidates.length = 0;
-          sendSignalMessage(codeToConnect, "sender", "receiver", "candidate-batch", batch);
+          sendSignalMessage(
+            codeToConnect,
+            "sender",
+            "receiver",
+            "candidate-batch",
+            batch,
+            senderTokenRef.current || undefined,
+          );
         }
       };
 
@@ -182,7 +199,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         } else if (pc.iceConnectionState === "disconnected") {
           setConnStatus("connecting");
           // Silently trigger ICE restart to auto-reconnect without resetting
-          triggerIceRestart(pc, codeToConnect, "sender", "receiver");
+          triggerIceRestart(pc, codeToConnect, "sender", "receiver", senderTokenRef.current || undefined);
         } else if (pc.iceConnectionState === "failed") {
           setConnStatus("disconnected");
           setChecking(false);
@@ -248,7 +265,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       const finalOffer = pc.localDescription
         ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
         : { type: offer.type, sdp: offer.sdp };
-      const sent = await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", finalOffer);
+      const sent = await sendSignalMessage(
+        codeToConnect,
+        "sender",
+        "receiver",
+        "offer",
+        finalOffer,
+        senderTokenRef.current || undefined,
+      );
       if (!sent) {
         throw new Error("Could not deliver WebRTC offer. Please confirm receiver code is active.");
       }
@@ -263,17 +287,21 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         }
       }, 35000);
 
-      // 7. Start signaling poll loop (responsive 600ms polling)
+      // 7. Start signaling poll loop with monotonic sequence cursor (responsive 600ms polling)
       pollRef.current = setInterval(async () => {
         try {
-          const messages = await fetchSignalMessages(
+          const pollRes = await fetchSignalMessages(
             codeToConnect,
             "sender",
-            lastSignalTimestamp.current,
+            lastSignalSeq.current,
+            senderTokenRef.current || undefined,
           );
 
-          for (const msg of messages) {
-            lastSignalTimestamp.current = Math.max(lastSignalTimestamp.current, msg.timestamp);
+          if (pollRes.cursor > lastSignalSeq.current) {
+            lastSignalSeq.current = pollRes.cursor;
+          }
+
+          for (const msg of pollRes.messages) {
 
             if (msg.type === "answer") {
               if (pc.signalingState === "have-local-offer") {
