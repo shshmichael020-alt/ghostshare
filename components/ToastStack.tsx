@@ -1,25 +1,55 @@
 "use client";
 
 import type { Toast } from "@/lib/useToasts";
+import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
 
-export default function ToastStack({ toasts }: { toasts: Toast[] }) {
+interface ToastStackProps {
+  toasts: Toast[];
+  onDismiss?: (id: string) => void;
+}
+
+export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
   if (toasts.length === 0) return null;
+
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col gap-2 z-50 items-stretch px-4 w-full max-w-sm pointer-events-none">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          className="px-4 py-2.5 rounded-lg border text-sm shadow-xl text-center backdrop-blur-md animate-[toast-in_0.2s_ease-out]"
-          style={{
-            background: "rgba(25,28,33,0.92)",
-            borderColor:
-              t.tone === "error" ? "var(--relay-red)" : t.tone === "success" ? "var(--relay-teal)" : "var(--relay-line)",
-            color: "var(--relay-text)",
-          }}
-        >
-          {t.message}
-        </div>
-      ))}
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
+      {toasts.map((t) => {
+        const isError = t.tone === "error";
+        const isSuccess = t.tone === "success";
+
+        return (
+          <div
+            key={t.id}
+            className={`pointer-events-auto flex items-center justify-between gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-xl transition-all duration-300 animate-toast ${
+              isError
+                ? "bg-surface-container-high/95 border-error/30 text-error"
+                : isSuccess
+                ? "bg-surface-container-high/95 border-tertiary/30 text-on-surface"
+                : "bg-surface-container-high/95 border-white/[0.1] text-on-surface"
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              {isError ? (
+                <AlertCircle size={16} className="text-error shrink-0" />
+              ) : isSuccess ? (
+                <CheckCircle2 size={16} className="text-tertiary shrink-0" />
+              ) : (
+                <Info size={16} className="text-secondary shrink-0" />
+              )}
+              <span className="font-body-sm font-medium truncate">{t.message}</span>
+            </div>
+            {onDismiss && (
+              <button
+                onClick={() => onDismiss(t.id)}
+                className="p-1 rounded text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer shrink-0"
+                aria-label="Dismiss toast"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -16,18 +16,22 @@ export type Session = {
   createdAt: number;
   expiresAt: number;
   files: StoredFile[];
+  lockedTtl?: boolean;
+  ttlSeconds?: number;
 };
 
 const SESSION_PREFIX = "session:";
 
-async function getKv() {
+export async function getKv() {
   const { env } = await getCloudflareContext({ async: true });
   const kv = (env as Record<string, KVNamespace | undefined>).SESSIONS_KV;
-  if (!kv) throw new Error("SESSIONS_KV binding not found - check wrangler.jsonc and your Cloudflare dashboard");
+  if (!kv) {
+    throw new Error("SESSIONS_KV binding not found — check wrangler.jsonc and your Cloudflare dashboard");
+  }
   return kv;
 }
 
-function sessionKey(code: string) {
+export function sessionKey(code: string) {
   return `${SESSION_PREFIX}${code}`;
 }
 
@@ -41,9 +45,6 @@ export function sessionUsedBytes(session: Session): number {
   return session.files.reduce((sum, f) => sum + f.size, 0);
 }
 
-// We store our own expiresAt timestamp because Workers KV doesn't expose a
-// "TTL remaining" read the way Redis does - this is the source of truth the
-// Receive panel's countdown is computed from.
 export function remainingSecondsFromSession(session: Session): number {
   return Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000));
 }
@@ -55,16 +56,37 @@ export async function createSession(code: string): Promise<Session> {
     createdAt: Date.now(),
     expiresAt: Date.now() + DEFAULT_TTL_SECONDS * 1000,
     files: [],
+    lockedTtl: false,
+    ttlSeconds: DEFAULT_TTL_SECONDS,
   };
-  // Cloudflare KV requires a minimum expirationTtl of 60 seconds (our
-  // smallest expiry option is 30 min, so we're always well above that).
   await kv.put(sessionKey(code), JSON.stringify(session), { expirationTtl: DEFAULT_TTL_SECONDS });
+  return session;
+}
+
+/**
+ * Locks the session TTL on upload initiation so countdown is fixed and options cannot be changed.
+ */
+export async function lockSessionTtl(code: string, ttlSeconds: number): Promise<Session | null> {
+  const kv = await getKv();
+  const session = await getSession(code);
+  if (!session) return null;
+
+  if (!session.lockedTtl) {
+    session.lockedTtl = true;
+    session.ttlSeconds = ttlSeconds;
+    session.expiresAt = Date.now() + ttlSeconds * 1000;
+    const ttlRemaining = Math.max(60, ttlSeconds);
+    await kv.put(sessionKey(code), JSON.stringify(session), { expirationTtl: ttlRemaining });
+  }
+
   return session;
 }
 
 export type AddFileResult =
   | { ok: true; session: Session }
   | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "expired" }
+  | { ok: false; reason: "duplicate" }
   | { ok: false; reason: "over_limit"; usedBytes: number; remainingBytes: number };
 
 export async function addFileToSession(
@@ -76,6 +98,16 @@ export async function addFileToSession(
   const session = await getSession(code);
   if (!session) return { ok: false, reason: "not_found" };
 
+  // Check if session already expired
+  if (Date.now() >= session.expiresAt) {
+    return { ok: false, reason: "expired" };
+  }
+
+  // Prevent duplicate file registration
+  if (session.files.some((f) => f.objectKey === file.objectKey)) {
+    return { ok: false, reason: "duplicate" };
+  }
+
   const usedBytes = sessionUsedBytes(session);
   const remainingBytes = MAX_TRANSFER_BYTES - usedBytes;
   if (file.size > remainingBytes) {
@@ -83,9 +115,17 @@ export async function addFileToSession(
   }
 
   session.files.push(file);
-  session.expiresAt = Date.now() + ttlSeconds * 1000;
-  // Re-setting the TTL here (re)starts the countdown from the moment of
-  // upload, so "3 hours" means 3 hours from when the file arrived.
-  await kv.put(sessionKey(code), JSON.stringify(session), { expirationTtl: ttlSeconds });
+
+  // If session TTL was not already locked, lock it with the chosen TTL
+  if (!session.lockedTtl) {
+    session.lockedTtl = true;
+    session.ttlSeconds = ttlSeconds;
+    session.expiresAt = Date.now() + ttlSeconds * 1000;
+  }
+
+  // Preserve existing expiry window - do not reset countdown on subsequent uploads
+  const ttlRemaining = Math.max(60, Math.round((session.expiresAt - Date.now()) / 1000));
+  await kv.put(sessionKey(code), JSON.stringify(session), { expirationTtl: ttlRemaining });
+
   return { ok: true, session };
 }

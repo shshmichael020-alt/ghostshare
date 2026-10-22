@@ -2,19 +2,30 @@
 
 import { useCallback, useRef, useState } from "react";
 
-export type Toast = { id: number; message: string; tone: "default" | "error" | "success" };
+export type Toast = {
+  id: string;
+  message: string;
+  tone: "default" | "error" | "success";
+};
 
 export function useToasts() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
 
-  const push = useCallback((message: string, tone: Toast["tone"] = "default") => {
-    const id = ++idRef.current;
-    setToasts((prev) => [...prev, { id, message, tone }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3500);
+  const dismiss = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  return { toasts, push };
+  const push = useCallback(
+    (message: string, tone: Toast["tone"] = "default") => {
+      const id = String(++idRef.current);
+      setToasts((prev) => [...prev, { id, message, tone }]);
+      setTimeout(() => {
+        dismiss(id);
+      }, 4000);
+    },
+    [dismiss],
+  );
+
+  return { toasts, push, dismiss };
 }

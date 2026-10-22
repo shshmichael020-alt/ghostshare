@@ -2,74 +2,77 @@
 
 import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Header from "@/components/Header";
+import SecurityModal from "@/components/SecurityModal";
 import SendPanel from "@/components/SendPanel";
 import ReceivePanel from "@/components/ReceivePanel";
-import { Ghost } from "lucide-react";
+import { Shield, Cloud, Lock } from "lucide-react";
 
-function Home() {
-  const params = useSearchParams();
-  const initialMode = params.get("mode") === "send" ? "send" : "receive";
-  const initialCode = params.get("code") ?? undefined;
-  const [mode, setMode] = useState<"send" | "receive">(initialMode);
+function GhostShareHome() {
+  const searchParams = useSearchParams();
+  const initialMode = searchParams.get("mode") === "send" ? "send" : "receive";
+  const initialCode = searchParams.get("code") ?? undefined;
+
+  const [mode, setMode] = useState<"receive" | "send">(initialMode);
+  const [isSecurityOpen, setIsSecurityOpen] = useState(false);
 
   return (
-    <main className="min-h-screen flex flex-col items-center px-4 py-10 sm:py-16">
-      <div className="w-full max-w-md flex flex-col gap-8">
-        <header className="text-center flex flex-col items-center gap-2">
-          <div
-            className="w-11 h-11 rounded-2xl flex items-center justify-center border"
-            style={{ borderColor: "var(--relay-line)", background: "var(--relay-panel)", color: "var(--relay-amber)" }}
-          >
-            <Ghost size={22} strokeWidth={1.75} />
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight">GhostShare</h1>
-          <p className="text-sm" style={{ color: "var(--relay-text-dim)" }}>
-            Move a file between two browsers. No account, no app.
-          </p>
-        </header>
+    <div className="min-h-screen flex flex-col justify-between bg-surface selection:bg-primary-container selection:text-on-primary-container relative overflow-x-hidden">
+      {/* Brand Header */}
+      <Header
+        mode={mode}
+        onModeChange={(m) => setMode(m)}
+        onOpenSecurity={() => setIsSecurityOpen(true)}
+      />
 
-        <div
-          className="relative grid grid-cols-2 p-1 rounded-xl border"
-          style={{ borderColor: "var(--relay-line)", background: "var(--relay-panel)" }}
-        >
-          <div
-            className="absolute top-1 bottom-1 w-[calc(50%-4px)] rounded-lg transition-transform duration-300 ease-out"
-            style={{
-              background: "var(--relay-panel-raised)",
-              transform: mode === "send" ? "translateX(0%)" : "translateX(calc(100% + 8px))",
-            }}
-          />
-          {(["send", "receive"] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className="relative z-10 py-2.5 rounded-lg text-sm font-medium capitalize transition-colors"
-              style={{ color: mode === m ? "var(--relay-amber)" : "var(--relay-text-dim)" }}
-            >
-              {m}
-            </button>
-          ))}
+      {/* Security Specifications Dialog */}
+      <SecurityModal isOpen={isSecurityOpen} onClose={() => setIsSecurityOpen(false)} />
+
+      {/* Main Workspace Canvas */}
+      <main className="w-full pt-20 sm:pt-24 pb-16 flex-1 flex flex-col items-center">
+        {/* Ambient atmospheric glows */}
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 w-[720px] h-[340px] bg-secondary/10 rounded-full blur-[120px] pointer-events-none -z-10" />
+        <div className="absolute top-52 right-12 w-[400px] h-[300px] bg-primary/10 rounded-full blur-[100px] pointer-events-none -z-10" />
+
+        <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 flex flex-col">
+          {mode === "receive" ? (
+            <ReceivePanel onOpenSecurity={() => setIsSecurityOpen(true)} />
+          ) : (
+            <SendPanel initialCode={initialCode} />
+          )}
         </div>
+      </main>
 
-        <section
-          className="rounded-2xl border p-6 sm:p-8"
-          style={{ borderColor: "var(--relay-line)", background: "var(--relay-panel)" }}
-        >
-          {mode === "send" ? <SendPanel initialCode={initialCode} /> : <ReceivePanel />}
-        </section>
+      {/* Footer */}
+      <footer className="w-full border-t border-white/[0.06] bg-surface-container-lowest/80 py-6 text-on-surface-variant font-body-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-4 text-xs font-mono-telemetry">
+            <span className="flex items-center gap-1.5 text-on-surface">
+              <Cloud size={14} className="text-secondary" /> Cloudflare R2 Direct
+            </span>
+            <span>•</span>
+            <span className="flex items-center gap-1.5 text-on-surface">
+              <Lock size={14} className="text-primary" /> Workers KV Ephemeral
+            </span>
+            <span>•</span>
+            <span className="flex items-center gap-1.5 text-tertiary">
+              <Shield size={14} /> 250 MB Combined Transfer
+            </span>
+          </div>
 
-        <p className="text-center text-xs" style={{ color: "var(--relay-text-dim)" }}>
-          Up to 250 MB per transfer · files and codes delete automatically · anyone with the code can access it
-        </p>
-      </div>
-    </main>
+          <div className="text-xs text-on-surface-variant/70 text-center sm:text-right">
+            <span>GhostShare v1.0 — Raw bytes, zero transcoding, self-destructing data tunnels.</span>
+          </div>
+        </div>
+      </footer>
+    </div>
   );
 }
 
 export default function Page() {
   return (
-    <Suspense fallback={null}>
-      <Home />
+    <Suspense fallback={<div className="min-h-screen bg-canvas-default" />}>
+      <GhostShareHome />
     </Suspense>
   );
 }
