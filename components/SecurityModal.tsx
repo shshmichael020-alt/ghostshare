@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { X, Shield, Lock, Cloud, Clock, Zap, CheckCircle2 } from "lucide-react";
+import { X, Shield, Lock, Radio, Clock, Zap, CheckCircle2 } from "lucide-react";
 
 interface SecurityModalProps {
   isOpen: boolean;
@@ -44,7 +44,7 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
                 Security & Architecture Specs
               </h2>
               <p className="font-mono-telemetry text-on-surface-variant">
-                TRANSPARENCY MANIFEST • ZERO-KNOWLEDGE PIPELINE
+                TRANSPARENCY MANIFEST • ZERO-KNOWLEDGE P2P PIPELINE
               </p>
             </div>
           </div>
@@ -62,19 +62,19 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
           {/* Section 1: Data path */}
           <div className="flex gap-4 items-start">
             <div className="w-9 h-9 rounded-xl bg-secondary/10 border border-secondary/20 flex items-center justify-center text-secondary shrink-0 mt-0.5">
-              <Cloud size={18} />
+              <Radio size={18} />
             </div>
             <div className="space-y-1">
               <h3 className="font-body-md font-semibold text-on-surface flex items-center gap-2">
-                Direct-to-R2 Signed Pipeline
+                Pure WebRTC P2P DataChannels
                 <span className="font-mono-telemetry text-secondary bg-secondary/10 px-2 py-0.5 rounded border border-secondary/20">
-                  NO PROXY
+                  ZERO CLOUD STORAGE
                 </span>
               </h3>
               <p className="text-sm leading-relaxed">
-                File bytes are never streamed through intermediate proxy servers or the Worker request body. The sender
-                browser transmits payloads directly to Cloudflare R2 object storage via presigned S3-compatible PUT
-                URLs signed using AWS Signature V4 with SHA-256 HMAC.
+                File bytes are never uploaded to any cloud storage provider (no R2, B2, or S3) and never transit through
+                any application proxy server. File payloads flow directly from browser RAM to browser RAM across encrypted
+                WebRTC SCTP data channels authenticated with DTLS 1.3.
               </p>
             </div>
           </div>
@@ -92,49 +92,49 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
                 </span>
               </h3>
               <p className="text-sm leading-relaxed">
-                Pairing tokens are generated using cryptographically secure random values via the Web Crypto API,
-                preventing predictability. Sessions reside in Cloudflare Workers KV with automatic time-to-live (TTL)
-                expiration. No passwords, user profiles, or tracking identifiers exist.
+                Pairing tokens are generated using unbiased rejection sampling over the Web Crypto CSPRNG
+                (`crypto.getRandomValues`). The signaling server exchanges only ephemeral session descriptions (SDP) and
+                ICE candidate addresses. No file names, bytes, user accounts, or persistent logs ever exist on the signaling layer.
               </p>
             </div>
           </div>
 
-          {/* Section 3: Ephemeral lifecycle */}
+          {/* Section 3: Ephemeral lifecycle & Explicit Approval */}
           <div className="flex gap-4 items-start">
             <div className="w-9 h-9 rounded-xl bg-tertiary/10 border border-tertiary/20 flex items-center justify-center text-tertiary shrink-0 mt-0.5">
               <Clock size={18} />
             </div>
             <div className="space-y-1">
               <h3 className="font-body-md font-semibold text-on-surface flex items-center gap-2">
-                Automated Self-Destruction
+                Explicit Receiver Authorization
                 <span className="font-mono-telemetry text-tertiary bg-tertiary/10 px-2 py-0.5 rounded border border-tertiary/20">
-                  LOCKED TTL
+                  CONSENT REQUIRED
                 </span>
               </h3>
               <p className="text-sm leading-relaxed">
-                Transfers feature configurable retention between 30 minutes and 24 hours. The moment the first upload
-                commences, the session expiration interval locks irrevocably to prevent batch desynchronization. Both
-                KV session keys and presigned download URLs automatically lapse once the chosen window concludes.
+                Before any bytes stream across the data channel, the sender must submit a transfer request manifest.
+                The receiver is presented with an explicit approval prompt displaying file names and sizes. If the receiver
+                declines or cancels, no file chunks are dispatched. Signaling channels automatically self-destruct after 15 minutes.
               </p>
             </div>
           </div>
 
-          {/* Section 4: Storage isolation & integrity */}
+          {/* Section 4: Memory Safety & Backpressure */}
           <div className="flex gap-4 items-start">
             <div className="w-9 h-9 rounded-xl bg-surface-container-high border border-white/[0.08] flex items-center justify-center text-on-surface shrink-0 mt-0.5">
               <Zap size={18} />
             </div>
             <div className="space-y-1">
               <h3 className="font-body-md font-semibold text-on-surface flex items-center gap-2">
-                Private Bucket & Strict Quotas
+                SCTP Chunking & Backpressure Throttling
                 <span className="font-mono-telemetry text-on-surface bg-white/10 px-2 py-0.5 rounded">
                   250 MB CAP
                 </span>
               </h3>
               <p className="text-sm leading-relaxed">
-                The storage bucket remains strictly private with zero public read permissions. Senders cannot overwrite
-                existing objects, exceed the 250 MB per-session ceiling, or manipulate internal object paths. The server
-                verifies object presence and actual byte sizes before finalizing registrations.
+                Files are streamed in 32 KB binary slices directly via `File.slice()`, avoiding browser RAM exhaustion.
+                When the WebRTC buffer exceeds 256 KB, transmission pauses automatically until the network adapter triggers
+                the `bufferedamountlow` event. Transfers are capped at 250 MB per batch.
               </p>
             </div>
           </div>
@@ -144,16 +144,16 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
             <span className="font-label-caps text-on-surface-variant">SECURITY CONTROLS SUMMARY</span>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono-telemetry">
               <div className="flex items-center gap-1.5 text-tertiary">
-                <CheckCircle2 size={14} /> TLS 1.3 Transport Encryption
+                <CheckCircle2 size={14} /> End-to-End DTLS 1.3 Encryption
               </div>
               <div className="flex items-center gap-1.5 text-tertiary">
-                <CheckCircle2 size={14} /> HMAC-SHA256 Signed URLs
+                <CheckCircle2 size={14} /> Public STUN NAT Traversal
               </div>
               <div className="flex items-center gap-1.5 text-tertiary">
-                <CheckCircle2 size={14} /> Rate Limited Session Endpoints
+                <CheckCircle2 size={14} /> Zero Cloud Storage / Zero Credit Cards
               </div>
               <div className="flex items-center gap-1.5 text-tertiary">
-                <CheckCircle2 size={14} /> RFC 6266 Header Sanitization
+                <CheckCircle2 size={14} /> Automatic Memory Backpressure Control
               </div>
             </div>
           </div>

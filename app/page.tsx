@@ -6,7 +6,7 @@ import Header from "@/components/Header";
 import SecurityModal from "@/components/SecurityModal";
 import SendPanel from "@/components/SendPanel";
 import ReceivePanel from "@/components/ReceivePanel";
-import { Shield, Cloud, Lock } from "lucide-react";
+import { Shield, Radio, Lock } from "lucide-react";
 
 function GhostShareHome() {
   const searchParams = useSearchParams();
@@ -48,15 +48,15 @@ function GhostShareHome() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-4 text-xs font-mono-telemetry">
             <span className="flex items-center gap-1.5 text-on-surface">
-              <Cloud size={14} className="text-secondary" /> Cloudflare R2 Direct
+              <Radio size={14} className="text-secondary" /> WebRTC P2P Direct
             </span>
             <span>•</span>
             <span className="flex items-center gap-1.5 text-on-surface">
-              <Lock size={14} className="text-primary" /> Workers KV Ephemeral
+              <Lock size={14} className="text-primary" /> DTLS 1.3 Encrypted
             </span>
             <span>•</span>
             <span className="flex items-center gap-1.5 text-tertiary">
-              <Shield size={14} /> 250 MB Combined Transfer
+              <Shield size={14} /> Zero Cloud Storage (250 MB Cap)
             </span>
           </div>
 

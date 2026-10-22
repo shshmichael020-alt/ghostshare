@@ -1,4 +1,4 @@
-import { getSession } from "./kv";
+import { getSignalingSession } from "./signalStore";
 
 /**
  * Generates an unbiased cryptographically secure 8-digit numeric pairing code (00000000 - 99999999).
@@ -21,9 +21,8 @@ export function generateSecureCode(): string {
 export async function generateUniqueCode(): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = generateSecureCode();
-    const existing = await getSession(code);
+    const existing = getSignalingSession(code);
     if (!existing) return code;
   }
-  // Astronomically unlikely, but handles collision safely
-  throw new Error("Could not generate a unique code, please retry");
+  throw new Error("Could not generate a unique pairing code, please retry");
 }

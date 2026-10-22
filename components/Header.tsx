@@ -20,12 +20,12 @@ export default function Header({ mode, onModeChange, onOpenSecurity }: HeaderPro
           <div className="flex items-center gap-2">
             <span className="font-headline-md tracking-tight font-semibold text-on-surface">GhostShare</span>
             <span className="hidden sm:inline-block px-2 py-0.5 rounded bg-surface-container-high text-on-surface-variant font-label-caps uppercase border border-white/[0.04]">
-              v1.0 • R2 Direct
+              v1.0 • WebRTC P2P
             </span>
           </div>
           <div className="hidden lg:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-container-low border border-white/[0.06]">
             <span className="h-1.5 w-1.5 rounded-full bg-tertiary animate-pulse" />
-            <span className="font-mono-telemetry text-tertiary">Workers KV Online • Low Latency</span>
+            <span className="font-mono-telemetry text-tertiary">WebRTC P2P Direct • Zero Cloud Storage</span>
           </div>
         </div>
 

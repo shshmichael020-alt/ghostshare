@@ -8,6 +8,13 @@ import ToastStack from "./ToastStack";
 import { useToasts } from "@/lib/useToasts";
 import { formatSize, formatCountdown } from "@/lib/format";
 import {
+  createPeerConnection,
+  sendSignalMessage,
+  fetchSignalMessages,
+  TransferManifestFile,
+  WebRTCMessage,
+} from "@/lib/webrtc";
+import {
   Key,
   QrCode,
   Copy,
@@ -20,15 +27,20 @@ import {
   CheckCircle2,
   ExternalLink,
   Layers,
+  Radio,
+  AlertTriangle,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 
-export type StoredFile = {
-  objectKey: string;
-  downloadUrl: string;
+export interface ReceivedFileItem {
+  id: string;
   name: string;
   size: number;
-  uploadedAt: number;
-};
+  downloadUrl: string;
+  blob: Blob;
+  receivedAt: number;
+}
 
 interface ReceivePanelProps {
   onOpenSecurity?: () => void;
@@ -36,111 +48,258 @@ interface ReceivePanelProps {
 
 export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const [code, setCode] = useState<string | null>(null);
-  const [files, setFiles] = useState<StoredFile[]>([]);
+  const [connStatus, setConnStatus] = useState<"idle" | "awaiting" | "connecting" | "connected" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [natWarning, setNatWarning] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
-  const [initialTtl, setInitialTtl] = useState<number>(3600);
+  const [initialTtl, setInitialTtl] = useState<number>(900); // 15 mins default signaling TTL
   const [copiedLink, setCopiedLink] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
 
+  // Transfer approval state
+  const [pendingApproval, setPendingApproval] = useState<{ files: TransferManifestFile[] } | null>(null);
+
+  // In-flight receiving file state
+  const [activeReceiving, setActiveReceiving] = useState<{
+    id: string;
+    name: string;
+    size: number;
+    receivedBytes: number;
+  } | null>(null);
+
+  // Completed files manifest
+  const [receivedFiles, setReceivedFiles] = useState<ReceivedFileItem[]>([]);
+
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const knownCountRef = useRef(0);
+  const lastSignalTimestamp = useRef<number>(0);
+
+  // In-memory buffer for chunks of current file
+  const currentChunksRef = useRef<ArrayBuffer[]>([]);
+  const currentMetaRef = useRef<{ id: string; name: string; size: number; mimeType: string } | null>(null);
+
   const { toasts, push, dismiss } = useToasts();
 
+  // Reset and cleanup peer connection & data channel
+  const cleanupConnection = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (tickRef.current) clearInterval(tickRef.current);
+    if (dcRef.current) {
+      dcRef.current.close();
+      dcRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+  }, []);
+
+  // Handle incoming data channel setup
+  const setupDataChannel = useCallback((channel: RTCDataChannel) => {
+    dcRef.current = channel;
+    channel.binaryType = "arraybuffer";
+
+    channel.onopen = () => {
+      setConnStatus("connected");
+      push("Direct P2P bridge established with Sender", "success");
+    };
+
+    channel.onclose = () => {
+      setConnStatus("awaiting");
+      push("Peer disconnected", "default");
+    };
+
+    channel.onerror = (err) => {
+      console.error("Data channel error:", err);
+      push("Data channel error encountered", "error");
+    };
+
+    channel.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        try {
+          const msg = JSON.parse(event.data) as WebRTCMessage;
+
+          if (msg.type === "transfer-request") {
+            setPendingApproval({ files: msg.files });
+            push(`Sender requested to transfer ${msg.files.length} file(s)`, "default");
+          } else if (msg.type === "file-start") {
+            currentChunksRef.current = [];
+            currentMetaRef.current = {
+              id: msg.id,
+              name: msg.name,
+              size: msg.size,
+              mimeType: msg.mimeType,
+            };
+            setActiveReceiving({
+              id: msg.id,
+              name: msg.name,
+              size: msg.size,
+              receivedBytes: 0,
+            });
+          } else if (msg.type === "file-end") {
+            const meta = currentMetaRef.current;
+            if (meta) {
+              const blob = new Blob(currentChunksRef.current, { type: meta.mimeType });
+              const downloadUrl = URL.createObjectURL(blob);
+              const completedItem: ReceivedFileItem = {
+                id: meta.id,
+                name: meta.name,
+                size: blob.size,
+                downloadUrl,
+                blob,
+                receivedAt: Date.now(),
+              };
+
+              setReceivedFiles((prev) => [...prev, completedItem]);
+              setActiveReceiving(null);
+              currentChunksRef.current = [];
+              currentMetaRef.current = null;
+
+              // Acknowledge file completion
+              channel.send(JSON.stringify({ type: "file-ack", id: meta.id }));
+              push(`Received: ${meta.name}`, "success");
+            }
+          } else if (msg.type === "transfer-complete") {
+            setActiveReceiving(null);
+            push("All files transferred successfully!", "success");
+          }
+        } catch (e) {
+          console.error("Failed to parse data channel message:", e);
+        }
+      } else if (event.data instanceof ArrayBuffer) {
+        // Binary chunk received
+        currentChunksRef.current.push(event.data);
+        setActiveReceiving((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            receivedBytes: prev.receivedBytes + event.data.byteLength,
+          };
+        });
+      }
+    };
+  }, [push]);
+
+  // Initialize a new receiving session and peer connection
   const startSession = useCallback(async () => {
+    cleanupConnection();
     setError(null);
+    setNatWarning(null);
     setExpired(false);
-    setFiles([]);
+    setReceivedFiles([]);
+    setPendingApproval(null);
+    setActiveReceiving(null);
     setCode(null);
     setRemaining(null);
-    knownCountRef.current = 0;
+    setConnStatus("idle");
+    lastSignalTimestamp.current = 0;
 
     try {
-      const res = await fetch("/api/session", { method: "POST" });
+      // 1. Create signaling session
+      const res = await fetch("/api/signal/session", { method: "POST" });
       if (!res.ok) {
         const errData = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(errData.error || "Could not start receiving session");
       }
-      const data = (await res.json()) as { code: string; expiresAt?: number };
-      setCode(data.code);
-      if (data.expiresAt) {
-        const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
-        setRemaining(rem);
-        setInitialTtl(rem || 3600);
-      }
+      const data = (await res.json()) as { code: string; expiresAt: number };
+      const currentCode = data.code;
+      setCode(currentCode);
+      const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
+      setRemaining(rem);
+      setInitialTtl(rem || 900);
+      setConnStatus("awaiting");
+
+      // 2. Initialize RTCPeerConnection
+      const pc = createPeerConnection();
+      pcRef.current = pc;
+
+      // Handle ICE candidates generated by local browser
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignalMessage(currentCode, "receiver", "sender", "candidate", event.candidate.toJSON());
+        }
+      };
+
+      // Monitor connection & ICE health
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+          setConnStatus("connected");
+          setNatWarning(null);
+        } else if (pc.iceConnectionState === "failed") {
+          setConnStatus("failed");
+          setNatWarning(
+            "Direct P2P UDP path could not be established. Both devices may be behind symmetric NAT or restrictive corporate firewalls.",
+          );
+        }
+      };
+
+      // Listen for data channel created by sender
+      pc.ondatachannel = (event) => {
+        setupDataChannel(event.channel);
+      };
+
+      // 3. Start signaling poll loop
+      pollRef.current = setInterval(async () => {
+        try {
+          const messages = await fetchSignalMessages(
+            currentCode,
+            "receiver",
+            lastSignalTimestamp.current,
+          );
+
+          for (const msg of messages) {
+            lastSignalTimestamp.current = Math.max(lastSignalTimestamp.current, msg.timestamp);
+
+            if (msg.type === "offer") {
+              setConnStatus("connecting");
+              const offerDesc = msg.data as RTCSessionDescriptionInit;
+              await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
+
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+
+              await sendSignalMessage(
+                currentCode,
+                "receiver",
+                "sender",
+                "answer",
+                answer,
+              );
+            } else if (msg.type === "candidate") {
+              const candidate = msg.data as RTCIceCandidateInit;
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (iceErr) {
+                console.warn("Failed to add ICE candidate:", iceErr);
+              }
+            } else if (msg.type === "leave") {
+              setConnStatus("awaiting");
+              push("Sender closed the session", "default");
+            }
+          }
+        } catch {
+          // Transient network error
+        }
+      }, 1000);
     } catch (e) {
       setError((e as Error).message);
+      setConnStatus("failed");
     }
-  }, []);
+  }, [cleanupConnection, setupDataChannel, push]);
 
   // Initialize session on mount
   useEffect(() => {
-    let cancelled = false;
-    async function init() {
-      if (!cancelled) {
-        await startSession();
-      }
-    }
-    init();
-
+    const timer = setTimeout(() => {
+      startSession();
+    }, 0);
     return () => {
-      cancelled = true;
-      if (pollRef.current) clearInterval(pollRef.current);
-      if (tickRef.current) clearInterval(tickRef.current);
+      clearTimeout(timer);
+      cleanupConnection();
     };
-  }, [startSession]);
-
-  // Polling for incoming files from sender
-  useEffect(() => {
-    if (!code) return;
-    if (pollRef.current) clearInterval(pollRef.current);
-
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/session/${code}`, { cache: "no-store" });
-        if (res.status === 404 || res.status === 410) {
-          setExpired(true);
-          if (pollRef.current) clearInterval(pollRef.current);
-          return;
-        }
-        if (!res.ok) return;
-
-        const data = (await res.json()) as {
-          files?: StoredFile[];
-          remainingSeconds?: number;
-          ttlSeconds?: number;
-        };
-
-        const newFiles: StoredFile[] = data.files ?? [];
-        if (newFiles.length > knownCountRef.current) {
-          const arrived = newFiles.slice(knownCountRef.current);
-          arrived.forEach((f) => {
-            push(`Incoming file: ${f.name} is ready for download`, "success");
-          });
-          if (typeof document !== "undefined") {
-            document.title = `(${newFiles.length}) Ready — GhostShare`;
-          }
-        }
-        knownCountRef.current = newFiles.length;
-        setFiles(newFiles);
-
-        if (typeof data.remainingSeconds === "number") {
-          setRemaining(data.remainingSeconds);
-        }
-        if (typeof data.ttlSeconds === "number") {
-          setInitialTtl(data.ttlSeconds);
-        }
-      } catch {
-        // Transient network error, keep polling
-      }
-    }, 2500);
-
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [code, push]);
+  }, [startSession, cleanupConnection]);
 
   // 1-second countdown ticker
   useEffect(() => {
@@ -182,7 +341,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       try {
         await navigator.share({
           title: "GhostShare File Transfer",
-          text: `Connect to GhostShare session with code ${code}`,
+          text: `Connect to GhostShare WebRTC session with code ${code}`,
           url: qrValue,
         });
       } catch {
@@ -193,34 +352,53 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     }
   }
 
-  // Trigger sequential download of all ready files
-  async function downloadAllFiles() {
-    if (files.length === 0 || downloadingAll) return;
-    setDownloadingAll(true);
-    push(`Downloading ${files.length} file${files.length > 1 ? "s" : ""}...`, "default");
+  // Handle explicit receiver approval
+  function handleAcceptTransfer() {
+    if (!dcRef.current || dcRef.current.readyState !== "open") {
+      push("Connection not ready", "error");
+      return;
+    }
+    const acceptMsg: WebRTCMessage = { type: "transfer-accept" };
+    dcRef.current.send(JSON.stringify(acceptMsg));
+    push("Transfer accepted. Commencing direct P2P streaming...", "success");
+    setPendingApproval(null);
+  }
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+  function handleDeclineTransfer() {
+    if (dcRef.current && dcRef.current.readyState === "open") {
+      const declineMsg: WebRTCMessage = {
+        type: "transfer-decline",
+        reason: "Declined by recipient",
+      };
+      dcRef.current.send(JSON.stringify(declineMsg));
+    }
+    push("Transfer declined", "default");
+    setPendingApproval(null);
+  }
+
+  // Sequential download of all received files
+  async function downloadAllFiles() {
+    if (receivedFiles.length === 0 || downloadingAll) return;
+    setDownloadingAll(true);
+    push(`Downloading ${receivedFiles.length} file${receivedFiles.length > 1 ? "s" : ""}...`, "default");
+
+    for (let i = 0; i < receivedFiles.length; i++) {
+      const file = receivedFiles[i];
       const link = document.createElement("a");
       link.href = file.downloadUrl;
       link.download = file.name;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
 
-      // 500ms delay between files to avoid aggressive popup blockers
-      if (i < files.length - 1) {
+      if (i < receivedFiles.length - 1) {
         await new Promise((r) => setTimeout(r, 600));
       }
     }
     setDownloadingAll(false);
   }
 
-  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
-
-  // Calculate countdown SVG circle progress
+  const totalBytesReceived = receivedFiles.reduce((sum, f) => sum + f.size, 0);
   const progressRatio = remaining !== null && initialTtl > 0 ? Math.min(1, remaining / initialTtl) : 1;
   const strokeDashoffset = 56.5 * (1 - progressRatio);
 
@@ -233,17 +411,17 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
             <span className="font-label-caps text-secondary tracking-widest uppercase">
-              Inbound Session Channel
+              WebRTC Direct P2P Tunnel
             </span>
             <span className="text-outline-variant font-mono-telemetry">•</span>
             <span className="font-mono-telemetry text-on-surface-variant">
-              {code ? `SESSION_ID #cf-${code.slice(0, 4)}-${code.slice(4)}` : "INITIALIZING..."}
+              {code ? `CHANNEL #cf-${code.slice(0, 4)}-${code.slice(4)}` : "INITIALIZING..."}
             </span>
           </div>
           <h1 className="font-display-hero text-on-surface tracking-tight">Receive Files</h1>
           <p className="font-body-md text-on-surface-variant max-w-xl">
-            Ephemeral peer tunnel ready. Data flows directly into private Cloudflare R2 buckets without transit logs
-            or server body proxies.
+            Ephemeral peer tunnel ready. Data flows directly browser-to-browser via WebRTC SCTP data channels with zero
+            cloud storage and zero transit logs.
           </p>
         </div>
 
@@ -253,37 +431,118 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             <span className="relative flex h-2 w-2">
               <span
                 className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                  files.length > 0 ? "bg-tertiary" : "bg-secondary"
+                  connStatus === "connected"
+                    ? "bg-tertiary"
+                    : connStatus === "connecting"
+                    ? "bg-primary"
+                    : connStatus === "failed"
+                    ? "bg-error"
+                    : "bg-secondary"
                 }`}
               />
               <span
                 className={`relative inline-flex rounded-full h-2 w-2 ${
-                  files.length > 0 ? "bg-tertiary" : "bg-secondary"
+                  connStatus === "connected"
+                    ? "bg-tertiary"
+                    : connStatus === "connecting"
+                    ? "bg-primary"
+                    : connStatus === "failed"
+                    ? "bg-error"
+                    : "bg-secondary"
                 }`}
               />
             </span>
             <span
               className={`font-mono-telemetry font-medium ${
-                files.length > 0 ? "text-tertiary" : "text-secondary"
+                connStatus === "connected"
+                  ? "text-tertiary"
+                  : connStatus === "connecting"
+                  ? "text-primary"
+                  : connStatus === "failed"
+                  ? "text-error"
+                  : "text-secondary"
               }`}
             >
-              {files.length > 0
-                ? `Synchronized • ${files.length} File${files.length > 1 ? "s" : ""} Available`
+              {connStatus === "connected"
+                ? "P2P Bridge Connected"
+                : connStatus === "connecting"
+                ? "Negotiating DTLS Handshake..."
+                : connStatus === "failed"
+                ? "Connection Failed"
                 : "Awaiting Sender Connection..."}
             </span>
           </div>
         </div>
       </div>
 
+      {/* NAT Warning Diagnostic Alert */}
+      {natWarning && (
+        <div className="p-4 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-start gap-3">
+          <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+          <div className="flex flex-col gap-1 text-xs sm:text-sm">
+            <span className="font-semibold">NAT Traversal Notice</span>
+            <p className="font-body-sm leading-relaxed">{natWarning}</p>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="p-4 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-center justify-between">
           <span className="font-body-sm">{error}</span>
           <button
             onClick={startSession}
-            className="px-3 py-1 bg-surface-container-high hover:bg-surface-bright rounded text-xs text-on-surface font-medium transition-colors"
+            className="px-3 py-1 bg-surface-container-high hover:bg-surface-bright rounded text-xs text-on-surface font-medium transition-colors cursor-pointer"
           >
             Retry
           </button>
+        </div>
+      )}
+
+      {/* Explicit Receiver Approval Prompt Banner */}
+      {pendingApproval && (
+        <div className="p-6 rounded-2xl bg-surface-container-high border-2 border-secondary shadow-2xl flex flex-col gap-4 animate-in fade-in slide-in-from-top-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-secondary/10 border border-secondary/20 flex items-center justify-center text-secondary">
+                <Radio size={20} className="animate-pulse" />
+              </div>
+              <div>
+                <h3 className="font-headline-md text-on-surface">Incoming Transfer Authorization</h3>
+                <p className="font-body-sm text-on-surface-variant">
+                  A connected peer wants to stream {pendingApproval.files.length} file(s) directly to your device.
+                </p>
+              </div>
+            </div>
+            <span className="font-mono-telemetry text-secondary bg-secondary/10 px-2.5 py-1 rounded border border-secondary/20">
+              APPROVAL REQUIRED
+            </span>
+          </div>
+
+          <div className="bg-surface-container rounded-xl p-3 max-h-48 overflow-y-auto flex flex-col gap-2 border border-white/[0.04]">
+            {pendingApproval.files.map((file) => (
+              <div key={file.id} className="flex items-center justify-between text-xs sm:text-sm">
+                <span className="text-on-surface font-medium truncate max-w-xs">{file.name}</span>
+                <span className="font-mono-telemetry text-on-surface-variant">{formatSize(file.size)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              onClick={handleDeclineTransfer}
+              className="px-4 py-2 rounded-lg bg-surface-container-lowest hover:bg-surface-container text-on-surface-variant hover:text-error transition-colors font-body-sm flex items-center gap-1.5 border border-white/[0.06] cursor-pointer"
+            >
+              <XCircle size={16} />
+              <span>Decline</span>
+            </button>
+            <button
+              onClick={handleAcceptTransfer}
+              className="px-5 py-2 rounded-lg bg-secondary text-on-secondary hover:bg-secondary-fixed transition-colors font-body-sm font-semibold flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+            >
+              <CheckCircle2 size={16} />
+              <span>Accept & Stream Files</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -296,8 +555,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           <div className="space-y-1">
             <h2 className="font-headline-md text-on-surface">This Pairing Session Has Expired</h2>
             <p className="font-body-md text-on-surface-variant max-w-md">
-              Pairing tokens and presigned links self-destruct once their time-to-live elapses to maintain
-              zero-knowledge privacy.
+              Signaling tokens and peer offers self-destruct once their time-to-live elapses to prevent stale connection attempts.
             </p>
           </div>
           <button
@@ -308,7 +566,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             <span>Generate New Session</span>
           </button>
         </div>
-      ) : files.length === 0 ? (
+      ) : receivedFiles.length === 0 && !activeReceiving ? (
         /* STAGE A: Waiting for files / Pairing Hub */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
           {/* Left Hero: Monospace Pairing Code Card */}
@@ -358,8 +616,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <PinDisplay code={code} onCopy={() => push("Pairing code copied to clipboard", "default")} />
 
               <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-white/[0.04]">
-                <span className="font-mono-telemetry">HANDSHAKE PROTOCOL: TLS 1.3 / AES-GCM-256</span>
-                <span className="font-mono-telemetry text-tertiary">BURNS UPON RECEPTION</span>
+                <span className="font-mono-telemetry">TRANSPORT: WebRTC DataChannel (SCTP)</span>
+                <span className="font-mono-telemetry text-tertiary">DTLS 1.3 ENCRYPTED</span>
               </div>
             </div>
 
@@ -430,10 +688,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 </div>
                 <div>
                   <h2 className="font-headline-md text-on-surface font-medium">
-                    Receiving Batch ({files.length} File{files.length > 1 ? "s" : ""} Ready)
+                    Received Manifest ({receivedFiles.length} File{receivedFiles.length > 1 ? "s" : ""} Ready)
                   </h2>
                   <p className="font-body-sm text-on-surface-variant">
-                    Direct R2 signed GET transfer • Zero Worker proxy overhead
+                    Direct WebRTC SCTP data stream • Zero Cloud Storage • Raw binary fidelity
                   </p>
                 </div>
               </div>
@@ -441,17 +699,17 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <div className="flex items-center gap-6">
                 <div className="text-right">
                   <span className="font-mono-telemetry text-on-surface-variant block uppercase">Total Size</span>
-                  <span className="font-mono-data text-secondary font-semibold">{formatSize(totalBytes)}</span>
+                  <span className="font-mono-data text-secondary font-semibold">{formatSize(totalBytesReceived)}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-mono-telemetry text-on-surface-variant block uppercase">Time Remaining</span>
+                  <span className="font-mono-telemetry text-on-surface-variant block uppercase">Tunnel State</span>
                   <span className="font-mono-data text-on-surface font-medium">
-                    {remaining !== null ? formatCountdown(remaining) : "Active"}
+                    {connStatus === "connected" ? "P2P Active" : "Session Paused"}
                   </span>
                 </div>
                 <button
                   onClick={downloadAllFiles}
-                  disabled={downloadingAll}
+                  disabled={receivedFiles.length === 0 || downloadingAll}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary text-on-secondary hover:bg-secondary-fixed font-body-sm font-semibold transition-all shadow-md active:scale-95 cursor-pointer disabled:opacity-50"
                 >
                   <Download size={16} />
@@ -460,25 +718,49 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               </div>
             </div>
 
+            {/* In-Flight File Streaming Progress Box */}
+            {activeReceiving && (
+              <div className="p-4 rounded-xl bg-surface-container border border-secondary/30 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Loader2 size={16} className="animate-spin text-secondary" />
+                    <span className="font-body-md text-on-surface font-medium truncate max-w-sm">
+                      Receiving: {activeReceiving.name}
+                    </span>
+                  </div>
+                  <span className="font-mono-telemetry text-secondary text-xs">
+                    {formatSize(activeReceiving.receivedBytes)} / {formatSize(activeReceiving.size)} (
+                    {Math.round((activeReceiving.receivedBytes / activeReceiving.size) * 100)}%)
+                  </span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-surface-container-highest overflow-hidden">
+                  <div
+                    className="h-full bg-secondary transition-all duration-100 rounded-full"
+                    style={{
+                      width: `${Math.min(100, (activeReceiving.receivedBytes / activeReceiving.size) * 100)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Low-Level Telemetry Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/[0.06]">
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Target Bucket</span>
-                <span className="font-mono-telemetry text-on-surface">ghostshare-files</span>
-              </div>
-              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Transport</span>
-                <span className="font-mono-telemetry text-on-surface">TLS 1.3 / Direct R2</span>
+                <span className="font-mono-telemetry text-on-surface">WebRTC / SCTP</span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Signing Auth</span>
-                <span className="font-mono-telemetry text-on-surface">AWS SigV4 HMAC</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Encryption</span>
+                <span className="font-mono-telemetry text-on-surface">DTLS-SRTP / GCM</span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">TTL Retention</span>
-                <span className="font-mono-telemetry text-tertiary">
-                  {remaining !== null ? `${formatCountdown(remaining)} remaining` : "Active"}
-                </span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">NAT Traversal</span>
+                <span className="font-mono-telemetry text-tertiary">STUN / Direct UDP</span>
+              </div>
+              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
+                <span className="font-label-caps text-on-surface-variant uppercase block">Cloud Storage</span>
+                <span className="font-mono-telemetry text-secondary">0 Bytes (Pure P2P)</span>
               </div>
             </div>
           </div>
@@ -487,18 +769,18 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
-                <span className="font-label-caps uppercase text-on-surface-variant">Incoming File Manifest</span>
+                <span className="font-label-caps uppercase text-on-surface-variant">Available Files</span>
                 <span className="bg-surface-container-high px-2 py-0.5 rounded font-mono-telemetry text-on-surface">
-                  {files.length} Item{files.length > 1 ? "s" : ""}
+                  {receivedFiles.length} Item{receivedFiles.length > 1 ? "s" : ""}
                 </span>
               </div>
-              <span className="font-mono-telemetry text-on-surface-variant">Egress Signed: HMAC-SHA256</span>
+              <span className="font-mono-telemetry text-on-surface-variant">Device RAM Blob Cache</span>
             </div>
 
             <div className="flex flex-col gap-2.5">
-              {files.map((file) => (
+              {receivedFiles.map((file) => (
                 <div
-                  key={file.objectKey}
+                  key={file.id}
                   className="bg-surface-container-low hover:bg-surface-container transition-all rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-white/[0.06] shadow-sm"
                 >
                   <div className="flex items-start gap-3.5 min-w-0">
@@ -518,10 +800,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2 font-mono-telemetry text-on-surface-variant">
-                        <span>Object Key:</span>
-                        <span className="truncate max-w-[200px] sm:max-w-xs text-on-surface">
-                          {file.objectKey}
-                        </span>
+                        <span>Delivery: Direct P2P Channel</span>
                       </div>
                     </div>
                   </div>
@@ -530,8 +809,6 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                     <a
                       href={file.downloadUrl}
                       download={file.name}
-                      target="_blank"
-                      rel="noopener noreferrer"
                       className="px-4 py-2 rounded-lg bg-secondary text-on-secondary font-body-sm font-medium hover:bg-secondary-fixed transition-colors flex items-center gap-2 shadow-sm cursor-pointer"
                     >
                       <Download size={16} />
@@ -549,7 +826,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-white/[0.04] text-on-surface-variant font-body-sm">
         <div className="flex items-center gap-2">
           <ShieldCheck size={16} className="text-secondary" />
-          <span>Zero logs · Raw binary fidelity · Automatic edge purge</span>
+          <span>Direct P2P DataChannels · Zero server storage · Raw binary fidelity</span>
         </div>
         {onOpenSecurity && (
           <button

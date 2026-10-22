@@ -3,11 +3,6 @@ import assert from "node:assert/strict";
 
 import { generateSecureCode } from "../lib/codes";
 import {
-  sanitizeFilename,
-  buildContentDisposition,
-  buildObjectKey,
-} from "../lib/r2";
-import {
   MAX_TRANSFER_BYTES,
   DEFAULT_TTL_SECONDS,
   EXPIRY_OPTIONS,
@@ -30,48 +25,6 @@ test("Pairing Code: generates valid 8-digit cryptographically secure codes", () 
 
   // With 100M possible codes, 500 random draws should have high uniqueness (> 490)
   assert.ok(codes.size >= total * 0.98, "High entropy and collision resistance");
-});
-
-test("Sanitize Filename: prevents directory traversal and control character injection", () => {
-  // Directory traversal
-  assert.equal(sanitizeFilename("../../secret.pem"), "______secret.pem");
-  assert.equal(sanitizeFilename("/etc/passwd"), "_etc_passwd");
-  assert.equal(sanitizeFilename("..\\..\\windows\\system32\\cmd.exe"), "______windows_system32_cmd.exe");
-
-  // CRLF and null byte injection
-  assert.equal(sanitizeFilename("invoice\r\nContent-Type: text/html.pdf"), "invoice__Content-Type__text_html.pdf");
-  assert.equal(sanitizeFilename("file\x00name.png"), "file_name.png");
-
-  // Fallback on empty or whitespace
-  assert.equal(sanitizeFilename(""), "file");
-  assert.equal(sanitizeFilename("   "), "file");
-});
-
-test("RFC 6266 Content-Disposition: formats safe ASCII fallback and UTF-8 encoded names", () => {
-  // Standard ASCII filename
-  const standard = buildContentDisposition("report-2026.pdf");
-  assert.match(standard, /^attachment; filename="report-2026\.pdf"; filename\*=UTF-8''report-2026\.pdf$/);
-
-  // Unicode / non-ASCII filename (Japanese, Accents)
-  const unicode = buildContentDisposition("財務報告書_Q3.pdf");
-  assert.ok(unicode.includes("filename*=UTF-8''%E8%B2%A1%E5%8B%99%E5%A0%B1%E5%91%8A%E6%9B%B8_Q3.pdf"));
-  // Fallback replaces 5 non-ASCII kanji with underscores followed by _Q3.pdf
-  assert.ok(unicode.includes('filename="______Q3.pdf"'));
-
-  // Header injection prevention: CRLF stripped to prevent HTTP response splitting
-  const injected = buildContentDisposition("legit.pdf\r\nSet-Cookie: stolen=1");
-  assert.ok(!injected.includes("\r"), "Must strip Carriage Return");
-  assert.ok(!injected.includes("\n"), "Must strip Line Feed");
-});
-
-test("Object Key: constructs isolated, scoped internal keys", () => {
-  const code = "83920194";
-  const key1 = buildObjectKey(code, "photo.jpg");
-  const key2 = buildObjectKey(code, "photo.jpg");
-
-  assert.ok(key1.startsWith(`${code}/`), "Object key must be scoped to session code prefix");
-  assert.ok(key1.endsWith("-photo.jpg"));
-  assert.notEqual(key1, key2, "Object keys must contain unique random hex salt to prevent overwrites");
 });
 
 test("Constants & Expiry: validates TTL options and 250 MB quota cap", () => {

@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { createSession } from "@/lib/kv";
 import { generateUniqueCode } from "@/lib/codes";
+import { createSignalingSession } from "@/lib/signalStore";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export async function POST(request: Request) {
   try {
     const ip = getClientIp(request);
-    const rl = checkRateLimit("session_create", ip, 15, 60_000);
+    const rl = checkRateLimit("session_create", ip, 20, 60_000);
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many session creation requests. Please wait a moment." },
@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     }
 
     const code = await generateUniqueCode();
-    const session = await createSession(code);
+    const session = createSignalingSession(code);
 
     return NextResponse.json({
       code: session.code,
@@ -24,6 +24,6 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     console.error("Session creation error:", err);
-    return NextResponse.json({ error: "Could not create session" }, { status: 500 });
+    return NextResponse.json({ error: "Could not create pairing session" }, { status: 500 });
   }
 }

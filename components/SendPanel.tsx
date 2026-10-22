@@ -1,13 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { EXPIRY_OPTIONS, DEFAULT_TTL_SECONDS, MAX_TRANSFER_BYTES } from "@/lib/constants";
+import { MAX_TRANSFER_BYTES } from "@/lib/constants";
 import { formatSize } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinInput from "./PinInput";
 import QrScannerModal from "./QrScannerModal";
 import ToastStack from "./ToastStack";
 import { useToasts } from "@/lib/useToasts";
+import {
+  createPeerConnection,
+  sendSignalMessage,
+  fetchSignalMessages,
+  streamFileOverDataChannel,
+  WebRTCMessage,
+} from "@/lib/webrtc";
 import {
   QrCode,
   X,
@@ -17,12 +24,13 @@ import {
   ArrowLeft,
   FolderOpen,
   CloudUpload,
-  Lock,
   Layers,
   MemoryStick,
   Sparkles,
   Shield,
   Trash2,
+  Radio,
+  AlertTriangle,
 } from "lucide-react";
 
 export type StagedItem = {
@@ -31,89 +39,201 @@ export type StagedItem = {
   name: string;
   size: number;
   progress: number;
-  status: "idle" | "uploading" | "done" | "error";
+  status: "idle" | "requesting" | "uploading" | "done" | "error";
   error?: string;
-  xhr?: XMLHttpRequest;
 };
-
-// PUT file straight to R2's presigned URL with real upload progress tracking via XHR
-function putWithProgress(
-  url: string,
-  file: File,
-  onProgress: (pct: number) => void,
-  xhrRef: (x: XMLHttpRequest) => void,
-) {
-  return new Promise<void>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhrRef(xhr);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress((e.loaded / e.total) * 100);
-      }
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
-      } else {
-        reject(new Error(`Upload failed (${xhr.status})`));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload to R2"));
-    xhr.onabort = () => {
-      const err = new Error("Canceled");
-      err.name = "AbortError";
-      reject(err);
-    };
-    xhr.open("PUT", url);
-    xhr.send(file);
-  });
-}
 
 export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const [codeInput, setCodeInput] = useState(initialCode ?? "");
   const [linkedCode, setLinkedCode] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [natWarning, setNatWarning] = useState<string | null>(null);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+
+  // WebRTC Connection State
+  const [connStatus, setConnStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
+  const [transferPhase, setTransferPhase] = useState<"idle" | "awaiting-approval" | "transferring" | "done">("idle");
 
   const [stagedFiles, setStagedFiles] = useState<StagedItem[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  const [expirySeconds, setExpirySeconds] = useState<number>(DEFAULT_TTL_SECONDS);
-  const [uploadStarted, setUploadStarted] = useState(false);
-  const [isUploadingBatch, setIsUploadingBatch] = useState(false);
 
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSignalTimestamp = useRef<number>(0);
+  const cancelTransferRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
   const { toasts, push, dismiss } = useToasts();
 
-  const verifyCode = useCallback(async (codeToVerify: string) => {
+  // Reset and disconnect WebRTC & signaling
+  const disconnectSession = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (dcRef.current) {
+      dcRef.current.close();
+      dcRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    setConnStatus("disconnected");
+    setTransferPhase("idle");
+    setLinkedCode(null);
+    setStagedFiles([]);
+    cancelTransferRef.current = false;
+  }, []);
+
+  // Set up WebRTC connection to receiver with pairing code
+  const connectToReceiver = useCallback(async (codeToConnect: string) => {
     setChecking(true);
     setCodeError(null);
+    setNatWarning(null);
+    disconnectSession();
+
     try {
-      const res = await fetch(`/api/session/${codeToVerify}`, { cache: "no-store" });
-      if (!res.ok) {
+      // 1. Verify session exists
+      const checkRes = await fetch(`/api/signal/session/${codeToConnect}`, { cache: "no-store" });
+      if (!checkRes.ok) {
         setCodeError("That 8-digit code is invalid, non-existent, or expired.");
         setChecking(false);
         return false;
       }
-      setLinkedCode(codeToVerify);
-      setChecking(false);
+
+      // 2. Join session
+      const joinRes = await fetch(`/api/signal/session/${codeToConnect}`, { method: "POST" });
+      if (!joinRes.ok) {
+        setCodeError("Could not join pairing session. Please try again.");
+        setChecking(false);
+        return false;
+      }
+
+      setLinkedCode(codeToConnect);
+      setConnStatus("connecting");
+      lastSignalTimestamp.current = 0;
+
+      // 3. Create WebRTC Peer Connection
+      const pc = createPeerConnection();
+      pcRef.current = pc;
+
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignalMessage(codeToConnect, "sender", "receiver", "candidate", event.candidate.toJSON());
+        }
+      };
+
+      // Handle ICE connection state changes
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+          setConnStatus("connected");
+          setNatWarning(null);
+        } else if (pc.iceConnectionState === "failed") {
+          setConnStatus("disconnected");
+          setNatWarning(
+            "Direct P2P UDP connection could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
+          );
+        }
+      };
+
+      // 4. Create Data Channel (sender initiates)
+      const dc = pc.createDataChannel("file-transfer", { ordered: true });
+      dcRef.current = dc;
+      dc.binaryType = "arraybuffer";
+
+      dc.onopen = () => {
+        setConnStatus("connected");
+        setChecking(false);
+        push("Direct P2P tunnel established with Recipient", "success");
+      };
+
+      dc.onclose = () => {
+        setConnStatus("disconnected");
+        push("Recipient disconnected", "default");
+      };
+
+      dc.onerror = (err) => {
+        console.error("Data channel error:", err);
+      };
+
+      // Listen for control messages from receiver
+      dc.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          try {
+            const msg = JSON.parse(event.data) as WebRTCMessage;
+            if (msg.type === "transfer-accept") {
+              push("Recipient approved transfer! Commencing P2P stream...", "success");
+              // Proceed with file streaming
+              setTransferPhase("transferring");
+            } else if (msg.type === "transfer-decline") {
+              push(msg.reason ? `Transfer declined: ${msg.reason}` : "Recipient declined the transfer request", "error");
+              setTransferPhase("idle");
+              setStagedFiles((prev) =>
+                prev.map((f) => (f.status === "requesting" ? { ...f, status: "idle" } : f)),
+              );
+            }
+          } catch (e) {
+            console.error("Failed to parse incoming control message:", e);
+          }
+        }
+      };
+
+      // 5. Create & send SDP offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", offer);
+
+      // 6. Start signaling poll loop
+      pollRef.current = setInterval(async () => {
+        try {
+          const messages = await fetchSignalMessages(
+            codeToConnect,
+            "sender",
+            lastSignalTimestamp.current,
+          );
+
+          for (const msg of messages) {
+            lastSignalTimestamp.current = Math.max(lastSignalTimestamp.current, msg.timestamp);
+
+            if (msg.type === "answer") {
+              const answerDesc = msg.data as RTCSessionDescriptionInit;
+              await pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
+            } else if (msg.type === "candidate") {
+              const candidate = msg.data as RTCIceCandidateInit;
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (iceErr) {
+                console.warn("Failed to add ICE candidate:", iceErr);
+              }
+            } else if (msg.type === "leave") {
+              setConnStatus("disconnected");
+              push("Recipient closed pairing channel", "default");
+            }
+          }
+        } catch {
+          // Transient network error
+        }
+      }, 1000);
+
       return true;
-    } catch {
-      setCodeError("Network error. Please verify your connection.");
+    } catch (e) {
+      setCodeError((e as Error).message);
       setChecking(false);
       return false;
     }
-  }, []);
+  }, [disconnectSession, push]);
 
-  // Check initial code from URL if provided (deferred to avoid cascading sync render)
+  // Check initial code from URL if provided
   useEffect(() => {
     if (initialCode && /^\d{8}$/.test(initialCode)) {
       const timer = setTimeout(() => {
-        verifyCode(initialCode);
+        connectToReceiver(initialCode);
       }, 0);
       return () => clearTimeout(timer);
     }
-  }, [initialCode, verifyCode]);
+  }, [initialCode, connectToReceiver]);
 
   // Combined transfer size computations
   const totalStagedBytes = stagedFiles.reduce((sum, f) => sum + f.size, 0);
@@ -170,118 +290,108 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   }, [linkedCode, handleFiles, push]);
 
   function removeStagedItem(id: string) {
-    setStagedFiles((prev) => {
-      const target = prev.find((item) => item.id === id);
-      target?.xhr?.abort();
-      return prev.filter((item) => item.id !== id);
-    });
+    setStagedFiles((prev) => prev.filter((item) => item.id !== id));
   }
 
   function clearAllStaged() {
-    stagedFiles.forEach((f) => f.xhr?.abort());
     setStagedFiles([]);
   }
 
-  // Upload an individual file through the direct-to-R2 pipeline
-  async function uploadSingleFile(item: StagedItem, code: string) {
+  // Request transfer approval from receiver
+  async function triggerTransferRequest() {
+    if (!dcRef.current || dcRef.current.readyState !== "open" || stagedFiles.length === 0) {
+      push("Connection not active or no files staged", "error");
+      return;
+    }
+
+    setTransferPhase("awaiting-approval");
     setStagedFiles((prev) =>
-      prev.map((u) => (u.id === item.id ? { ...u, status: "uploading", progress: 0 } : u)),
+      prev.map((f) => (f.status === "idle" ? { ...f, status: "requesting" } : f)),
     );
 
-    try {
-      // Step 1: Request presigned PUT URL and scoped download URL
-      const presignRes = await fetch("/api/upload-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          name: item.name,
-          size: item.size,
-          expirySeconds,
-        }),
-      });
+    const manifestFiles = stagedFiles.map((f) => ({
+      id: f.id,
+      name: f.name,
+      size: f.size,
+      type: f.file.type || "application/octet-stream",
+    }));
 
-      if (!presignRes.ok) {
-        const data = (await presignRes.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error || "Could not generate upload URL");
-      }
+    const reqMsg: WebRTCMessage = {
+      type: "transfer-request",
+      files: manifestFiles,
+    };
 
-      const { uploadUrl, downloadUrl, objectKey } = (await presignRes.json()) as {
-        uploadUrl: string;
-        downloadUrl: string;
-        objectKey: string;
-      };
-
-      // Step 2: PUT file bytes directly to Cloudflare R2 bucket with live progress
-      await putWithProgress(
-        uploadUrl,
-        item.file,
-        (pct) => {
-          setStagedFiles((prev) =>
-            prev.map((u) => (u.id === item.id ? { ...u, progress: pct } : u)),
-          );
-        },
-        (xhr) => {
-          setStagedFiles((prev) =>
-            prev.map((u) => (u.id === item.id ? { ...u, xhr } : u)),
-          );
-        },
-      );
-
-      // Step 3: Register verified upload in Workers KV session
-      const regRes = await fetch("/api/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          objectKey,
-          downloadUrl,
-          name: item.name,
-          size: item.size,
-          expirySeconds,
-        }),
-      });
-
-      if (!regRes.ok) {
-        const data = (await regRes.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error || "Could not register file in session");
-      }
-
-      setStagedFiles((prev) =>
-        prev.map((u) => (u.id === item.id ? { ...u, status: "done", progress: 100 } : u)),
-      );
-      push(`${item.name} uploaded successfully`, "success");
-    } catch (e) {
-      const isAbort = (e as Error).name === "AbortError";
-      const message = isAbort ? "Canceled" : (e as Error).message;
-      setStagedFiles((prev) =>
-        prev.map((u) => (u.id === item.id ? { ...u, status: "error", error: message } : u)),
-      );
-      if (!isAbort) {
-        push(`${item.name} failed: ${message}`, "error");
-      }
-    }
+    dcRef.current.send(JSON.stringify(reqMsg));
+    push("Transfer authorization request sent to Recipient...", "default");
   }
 
-  // Batch upload all idle/retry files
-  async function triggerBatchUpload() {
-    if (!linkedCode || stagedFiles.length === 0 || isUploadingBatch) return;
+  // Stream staged files once accepted
+  useEffect(() => {
+    if (transferPhase !== "transferring") return;
 
-    setUploadStarted(true);
-    setIsUploadingBatch(true);
+    let isSubscribed = true;
 
-    const pending = stagedFiles.filter((f) => f.status === "idle" || f.status === "error");
-    for (const item of pending) {
-      await uploadSingleFile(item, linkedCode);
+    async function streamAllFiles() {
+      if (!dcRef.current || dcRef.current.readyState !== "open") return;
+
+      cancelTransferRef.current = false;
+      const pending = stagedFiles.filter((f) => f.status === "requesting" || f.status === "idle");
+
+      for (const item of pending) {
+        if (!isSubscribed || cancelTransferRef.current) break;
+
+        setStagedFiles((prev) =>
+          prev.map((f) => (f.id === item.id ? { ...f, status: "uploading", progress: 0 } : f)),
+        );
+
+        try {
+          await streamFileOverDataChannel(
+            dcRef.current,
+            item.file,
+            item.id,
+            (sent, total) => {
+              if (!isSubscribed) return;
+              const pct = Math.round((sent / total) * 100);
+              setStagedFiles((prev) =>
+                prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
+              );
+            },
+            () => cancelTransferRef.current,
+          );
+
+          if (!isSubscribed) return;
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.id === item.id ? { ...f, status: "done", progress: 100 } : f)),
+          );
+          push(`${item.name} transferred directly!`, "success");
+        } catch (err) {
+          if (!isSubscribed) return;
+          const msg = (err as Error).message || "Streaming interrupted";
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.id === item.id ? { ...f, status: "error", error: msg } : f)),
+          );
+          push(`Failed to stream ${item.name}: ${msg}`, "error");
+        }
+      }
+
+      if (isSubscribed && !cancelTransferRef.current) {
+        dcRef.current.send(JSON.stringify({ type: "transfer-complete" }));
+        setTransferPhase("done");
+        push("All files transferred to recipient successfully!", "success");
+      }
     }
 
-    setIsUploadingBatch(false);
-  }
+    streamAllFiles();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [transferPhase, push, stagedFiles]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */
   /* ------------------------------------------------------------- */
-  if (!linkedCode) {
+  if (!linkedCode || connStatus !== "connected") {
     return (
       <div className="w-full flex flex-col items-center">
         <ToastStack toasts={toasts} onDismiss={dismiss} />
@@ -290,7 +400,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           onClose={() => setIsScannerOpen(false)}
           onScanSuccess={(scannedCode) => {
             setCodeInput(scannedCode);
-            verifyCode(scannedCode);
+            connectToReceiver(scannedCode);
           }}
         />
 
@@ -301,14 +411,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         <div className="text-center max-w-lg mb-8">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-container-high text-primary font-label-caps tracking-widest uppercase mb-3 border border-white/[0.06]">
             <Sparkles size={14} />
-            <span>Zero-Knowledge Peer Sync</span>
+            <span>WebRTC Direct P2P Tunnel</span>
           </div>
           <h2 className="font-headline-lg text-on-surface tracking-tight font-medium mb-2">
             Establish Encrypted Bridge
           </h2>
           <p className="font-body-md text-on-surface-variant">
-            Connect directly with your receiving device via ephemeral Workers KV handshake and signed Cloudflare R2
-            pipeline.
+            Connect directly with your receiving device via ephemeral WebRTC SCTP data channels. Zero cloud file storage,
+            zero credit cards, pure peer-to-peer byte stream.
           </p>
         </div>
 
@@ -342,7 +452,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               setCodeInput(val);
               setCodeError(null);
             }}
-            onComplete={(code) => verifyCode(code)}
+            onComplete={(code) => connectToReceiver(code)}
             disabled={checking}
           />
 
@@ -353,15 +463,22 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             </div>
           )}
 
+          {natWarning && (
+            <div className="p-3.5 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-start gap-2 text-xs font-body-sm">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              <span>{natWarning}</span>
+            </div>
+          )}
+
           {/* Action Row */}
           <div className="flex flex-col sm:flex-row gap-3 pt-2">
             <button
-              onClick={() => verifyCode(codeInput)}
+              onClick={() => connectToReceiver(codeInput)}
               disabled={codeInput.length !== 8 || checking}
               className="flex-1 py-3 px-4 rounded-xl bg-primary text-on-primary font-body-md font-semibold hover:bg-primary-container hover:text-on-primary-container transition-all flex items-center justify-center gap-2 shadow-md active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {checking ? <Loader2 size={18} className="animate-spin" /> : null}
-              <span>{checking ? "Verifying Session..." : "Connect Recipient"}</span>
+              <span>{checking ? "Negotiating WebRTC Bridge..." : "Connect Recipient"}</span>
             </button>
 
             <button
@@ -375,8 +492,8 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           </div>
 
           <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-on-surface-variant font-mono-telemetry">
-            <span>PAIRING PROTOCOL: ED25519 / TLS 1.3</span>
-            <span className="text-tertiary">EPHEMERAL TUNNEL</span>
+            <span>PAIRING PROTOCOL: WebRTC / SCTP</span>
+            <span className="text-tertiary">ZERO-KNOWLEDGE P2P</span>
           </div>
         </div>
       </div>
@@ -384,7 +501,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   }
 
   /* ------------------------------------------------------------- */
-  /* STEP 2: File Selection & Pre-Upload Staging                   */
+  /* STEP 2: File Selection & Direct P2P Streaming                 */
   /* ------------------------------------------------------------- */
   const idleCount = stagedFiles.filter((f) => f.status === "idle").length;
   const isAllDone = stagedFiles.length > 0 && stagedFiles.every((f) => f.status === "done");
@@ -397,12 +514,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       <section className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-surface-container-low border border-white/[0.08] shadow-sm">
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => {
-              setLinkedCode(null);
-              setStagedFiles([]);
-              setCodeInput("");
-              setUploadStarted(false);
-            }}
+            onClick={disconnectSession}
             className="flex items-center gap-1.5 text-xs font-body-sm text-on-surface-variant hover:text-on-surface bg-surface-container px-2.5 py-1.5 rounded-lg border border-white/[0.04] transition-colors cursor-pointer"
             title="Disconnect and change code"
           >
@@ -422,18 +534,18 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-container-high text-on-surface">
             <span className="w-2 h-2 rounded-full bg-tertiary" />
-            <span className="font-body-sm font-medium">Target Active</span>
+            <span className="font-body-sm font-medium">Peer Connected (P2P Direct)</span>
           </div>
         </div>
 
         <div className="flex items-center gap-4 font-mono-telemetry text-on-surface-variant">
           <div className="flex items-center gap-1.5">
             <Shield size={14} className="text-secondary" />
-            <span>R2 Direct Pipe</span>
+            <span>DTLS 1.3 Encryption</span>
           </div>
           <div className="flex items-center gap-1.5 bg-surface-container px-2.5 py-1 rounded border border-white/[0.04]">
-            <Lock size={14} className="text-primary" />
-            <span>TTL: {EXPIRY_OPTIONS.find((o) => o.seconds === expirySeconds)?.label}</span>
+            <Radio size={14} className="text-primary" />
+            <span>STUN Traversal Active</span>
           </div>
         </div>
       </section>
@@ -467,7 +579,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               <CloudUpload size={28} />
             </div>
             <h2 className="font-headline-md text-on-surface mb-1">
-              Stage Files for Instant Payload Emission
+              Stage Files for Instant Peer Transfer
             </h2>
             <p className="font-body-md text-on-surface-variant max-w-lg mb-4">
               Drag files here, browse device, or paste (
@@ -489,7 +601,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 <span>Select from Disk</span>
               </button>
               <span className="text-outline-variant font-mono-telemetry">
-                Direct Browser-to-R2 Transfer
+                Direct Browser-to-Browser Transfer
               </span>
             </div>
             <input
@@ -513,7 +625,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                     {stagedFiles.length} item{stagedFiles.length > 1 ? "s" : ""}
                   </span>
                 </div>
-                {!isUploadingBatch && (
+                {transferPhase === "idle" && (
                   <button
                     onClick={clearAllStaged}
                     className="font-body-sm text-on-surface-variant hover:text-error transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -551,21 +663,23 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                   ? "text-error"
                                   : item.status === "uploading"
                                   ? "text-secondary flex items-center gap-1"
+                                  : item.status === "requesting"
+                                  ? "text-primary flex items-center gap-1"
                                   : "text-on-surface-variant"
                               }
                             >
                               {item.status === "done" && (
                                 <>
-                                  <Check size={12} /> Ready
+                                  <Check size={12} /> Transferred
                                 </>
                               )}
                               {item.status === "error" && (item.error || "Failed")}
                               {item.status === "uploading" && (
                                 <>
-                                  <Loader2 size={12} className="animate-spin" /> Uploading (
-                                  {Math.round(item.progress)}%)
+                                  <Loader2 size={12} className="animate-spin" /> Streaming ({item.progress}%)
                                 </>
                               )}
+                              {item.status === "requesting" && "Awaiting Approval"}
                               {item.status === "idle" && "Staged"}
                             </span>
                           </div>
@@ -574,7 +688,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
                       <button
                         onClick={() => removeStagedItem(item.id)}
-                        disabled={item.status === "uploading" && isUploadingBatch}
+                        disabled={item.status === "uploading"}
                         className="p-1.5 text-on-surface-variant hover:text-error rounded-lg hover:bg-surface-container-lowest transition-colors cursor-pointer disabled:opacity-30"
                         title="Remove payload segment"
                         type="button"
@@ -628,65 +742,35 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
         {/* Right: Expiration Rules & Trigger Panel (4 cols) */}
         <div className="lg:col-span-4 flex flex-col gap-5">
-          {/* Ephemeral TTL Configuration Card */}
+          {/* Direct P2P Architecture Card */}
           <div className="rounded-2xl bg-surface-container-low p-5 sm:p-6 border border-white/[0.08] flex flex-col gap-4 shadow-sm">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-on-surface">
                 <Layers size={18} className="text-secondary" />
-                <h3 className="font-headline-md">Self-Destruct TTL</h3>
+                <h3 className="font-headline-md">Zero Cloud Storage</h3>
               </div>
               <span className="font-label-caps text-secondary bg-surface-container px-2 py-0.5 rounded border border-white/[0.04] uppercase">
-                Zero-Trace
+                Direct P2P
               </span>
             </div>
 
             <p className="font-body-sm text-on-surface-variant leading-relaxed">
-              Targeted Cloudflare R2 files purge irreversibly once the interval lapses.
+              Files travel directly between browsers through SCTP data channels. Chunks are buffered on-demand with automatic
+              backpressure throttling, keeping memory footprint low.
             </p>
 
-            {/* Duration Selector Options */}
-            <div className="flex flex-col gap-1.5">
-              {EXPIRY_OPTIONS.map((opt) => {
-                const isSelected = expirySeconds === opt.seconds;
-                return (
-                  <label
-                    key={opt.seconds}
-                    className={`flex items-center justify-between p-2.5 rounded-xl border transition-all cursor-pointer ${
-                      isSelected
-                        ? "bg-surface-container-highest border-secondary/40 text-on-surface shadow-sm"
-                        : "bg-surface-container border-transparent hover:bg-surface-container-high text-on-surface-variant"
-                    } ${uploadStarted ? "opacity-60 cursor-not-allowed" : ""}`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <input
-                        type="radio"
-                        name="expiry"
-                        value={opt.seconds}
-                        checked={isSelected}
-                        disabled={uploadStarted}
-                        onChange={() => setExpirySeconds(opt.seconds)}
-                        className="accent-secondary w-4 h-4 cursor-pointer"
-                      />
-                      <span className="font-body-md font-medium text-on-surface">{opt.label}</span>
-                    </div>
-                    {opt.seconds === 3600 && (
-                      <span className="font-mono-telemetry text-secondary text-xs">Recommended</span>
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-
-            {/* Locking Warning Alert */}
-            <div className="p-3 rounded-xl bg-surface-container border border-white/[0.04] flex items-start gap-2.5">
-              <Lock size={16} className="text-secondary shrink-0 mt-0.5" />
-              <div className="flex flex-col gap-0.5">
-                <span className="font-label-caps uppercase text-secondary font-bold">Locking Rule</span>
-                <p className="font-body-sm text-on-surface-variant leading-relaxed">
-                  {uploadStarted
-                    ? "Expiry locked for this batch to ensure consistent download lifetimes."
-                    : "Expiry locks permanently the moment the first upload begins to ensure batch link consistency."}
-                </p>
+            <div className="p-3 rounded-xl bg-surface-container border border-white/[0.04] flex flex-col gap-2">
+              <div className="flex items-center justify-between font-mono-telemetry text-xs">
+                <span className="text-on-surface-variant">SCTP MTU Traversal:</span>
+                <span className="text-on-surface">32 KB Chunks</span>
+              </div>
+              <div className="flex items-center justify-between font-mono-telemetry text-xs">
+                <span className="text-on-surface-variant">Backpressure Throttling:</span>
+                <span className="text-tertiary">256 KB Limit</span>
+              </div>
+              <div className="flex items-center justify-between font-mono-telemetry text-xs">
+                <span className="text-on-surface-variant">Transit Storage:</span>
+                <span className="text-secondary font-semibold">0 Bytes in Cloud</span>
               </div>
             </div>
           </div>
@@ -696,28 +780,33 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between font-mono-telemetry">
                 <span className="text-on-surface-variant">SECURITY PROTOCOL</span>
-                <span className="text-tertiary">AES-GCM-256</span>
+                <span className="text-tertiary">DTLS-SRTP / GCM</span>
               </div>
               <div className="flex items-center justify-between font-mono-telemetry">
                 <span className="text-on-surface-variant">TARGET PEER</span>
                 <span className="text-on-surface">Connected Recipient</span>
               </div>
               <div className="flex items-center justify-between font-mono-telemetry">
-                <span className="text-on-surface-variant">STORAGE ENGINE</span>
-                <span className="text-secondary">R2 Object Storage</span>
+                <span className="text-on-surface-variant">TRANSPORT ENGINE</span>
+                <span className="text-secondary">WebRTC DataChannel</span>
               </div>
             </div>
 
             {/* Primary Action Button */}
             <button
-              onClick={triggerBatchUpload}
-              disabled={stagedFiles.length === 0 || isUploadingBatch || isAllDone}
+              onClick={triggerTransferRequest}
+              disabled={stagedFiles.length === 0 || transferPhase !== "idle" || isAllDone}
               className="w-full py-3.5 px-4 rounded-xl bg-secondary text-on-secondary font-headline-md font-semibold hover:bg-secondary-fixed transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
-              {isUploadingBatch ? (
+              {transferPhase === "awaiting-approval" ? (
                 <>
                   <Loader2 size={20} className="animate-spin text-on-secondary" />
-                  <span>Streaming to R2...</span>
+                  <span>Awaiting Recipient Approval...</span>
+                </>
+              ) : transferPhase === "transferring" ? (
+                <>
+                  <Loader2 size={20} className="animate-spin text-on-secondary" />
+                  <span>Streaming P2P DataChannel...</span>
                 </>
               ) : isAllDone ? (
                 <>
@@ -729,7 +818,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                   <CloudUpload size={20} />
                   <span>
                     {idleCount > 0
-                      ? `Begin Direct Upload (${idleCount} file${idleCount > 1 ? "s" : ""})`
+                      ? `Begin Direct Transfer (${idleCount} file${idleCount > 1 ? "s" : ""})`
                       : "Stage Files Above"}
                   </span>
                 </>
