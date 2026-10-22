@@ -108,6 +108,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const setupDataChannel = useCallback((channel: RTCDataChannel) => {
     dcRef.current = channel;
     channel.binaryType = "arraybuffer";
+    channel.bufferedAmountLowThreshold = 64 * 1024;
 
     channel.onopen = () => {
       setConnStatus("connected");
@@ -201,15 +202,22 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         } catch (e) {
           console.error("Failed to parse data channel message:", e);
         }
-      } else if (event.data instanceof ArrayBuffer) {
+      } else if (event.data instanceof ArrayBuffer || (typeof Blob !== "undefined" && event.data instanceof Blob)) {
         // Binary chunk received -> stream directly to OPFS disk handle
+        let buffer: ArrayBuffer;
+        if (event.data instanceof ArrayBuffer) {
+          buffer = event.data;
+        } else {
+          buffer = await (event.data as Blob).arrayBuffer();
+        }
+
         if (activeSinkRef.current) {
-          await activeSinkRef.current.write(event.data);
+          await activeSinkRef.current.write(buffer);
           setActiveReceiving((prev) => {
             if (!prev) return null;
             return {
               ...prev,
-              receivedBytes: prev.receivedBytes + event.data.byteLength,
+              receivedBytes: prev.receivedBytes + buffer.byteLength,
             };
           });
         }

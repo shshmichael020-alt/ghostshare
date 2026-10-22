@@ -52,20 +52,27 @@ export async function createIncomingFileSink(
     try {
       const fileHandle = await dir.getFileHandle(fileName, { create: true });
       // Use createWritable if supported
-      if ("createWritable" in fileHandle) {
+      if (typeof fileHandle.createWritable === "function") {
         const writable = await fileHandle.createWritable({ keepExistingData: startOffset > 0 });
         if (startOffset > 0) {
           await writable.seek(startOffset);
         }
 
         let bytesWritten = startOffset;
+        let writeChain: Promise<void> = Promise.resolve();
 
         return {
           write: async (chunk: ArrayBuffer) => {
-            await writable.write(chunk);
-            bytesWritten += chunk.byteLength;
+            // Chain write operations sequentially so concurrent WebRTC chunks never collide
+            writeChain = writeChain.then(async () => {
+              await writable.write(chunk);
+              bytesWritten += chunk.byteLength;
+            });
+            await writeChain;
           },
           close: async () => {
+            // Await all queued chunk writes before closing the stream
+            await writeChain;
             await writable.close();
             return await fileHandle.getFile();
           },

@@ -88,23 +88,29 @@ export async function sendChunkWithBackpressure(
     throw new Error("Data channel is closed");
   }
 
-  if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-    await new Promise<void>((resolve, reject) => {
+  // Ensure threshold is configured for browser notification
+  if (channel.bufferedAmountLowThreshold === 0) {
+    channel.bufferedAmountLowThreshold = 64 * 1024;
+  }
+
+  // If buffer is above high-water mark, wait for drain or failsafe timeout
+  while (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+    if (channel.readyState !== "open") {
+      throw new Error("Data channel closed while waiting for buffer to drain");
+    }
+
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const onLow = () => {
-        cleanup();
+        if (timer) clearTimeout(timer);
+        channel.removeEventListener("bufferedamountlow", onLow);
         resolve();
       };
-      const onClose = () => {
-        cleanup();
-        reject(new Error("Data channel closed while waiting for buffer to drain"));
-      };
-      const cleanup = () => {
-        channel.removeEventListener("bufferedamountlow", onLow);
-        channel.removeEventListener("close", onClose);
-      };
-
       channel.addEventListener("bufferedamountlow", onLow);
-      channel.addEventListener("close", onClose);
+      timer = setTimeout(() => {
+        channel.removeEventListener("bufferedamountlow", onLow);
+        resolve();
+      }, 30);
     });
   }
 

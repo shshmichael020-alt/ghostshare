@@ -57,6 +57,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const [transferPhase, setTransferPhase] = useState<"idle" | "awaiting-approval" | "transferring" | "done">("idle");
 
   const [stagedFiles, setStagedFiles] = useState<StagedItem[]>([]);
+  const stagedFilesRef = useRef(stagedFiles);
+  useEffect(() => {
+    stagedFilesRef.current = stagedFiles;
+  }, [stagedFiles]);
+
   const [dragOver, setDragOver] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -153,6 +158,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       const dc = pc.createDataChannel("file-transfer", { ordered: true });
       dcRef.current = dc;
       dc.binaryType = "arraybuffer";
+      dc.bufferedAmountLowThreshold = 64 * 1024;
 
       dc.onopen = () => {
         if (connectTimeoutRef.current) {
@@ -353,7 +359,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       if (!dcRef.current || dcRef.current.readyState !== "open") return;
 
       cancelTransferRef.current = false;
-      const pending = stagedFiles.filter((f) => f.status === "requesting" || f.status === "idle");
+      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting" || f.status === "idle");
 
       for (const item of pending) {
         if (!isSubscribed || cancelTransferRef.current) break;
@@ -370,7 +376,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             0,
             (sent, total) => {
               if (!isSubscribed) return;
-              const pct = Math.round((sent / total) * 100);
+              const pct = Math.min(99, Math.round((sent / total) * 100));
               setStagedFiles((prev) =>
                 prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
               );
@@ -405,7 +411,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     return () => {
       isSubscribed = false;
     };
-  }, [transferPhase, push, stagedFiles]);
+  }, [transferPhase, push]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */
