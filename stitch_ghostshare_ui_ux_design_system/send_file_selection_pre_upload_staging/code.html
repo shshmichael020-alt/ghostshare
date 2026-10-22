@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><meta content="web_standard" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=JetBrains+Mono:wght@100..900&display=swap" rel="stylesheet"/><style>@layer base{html,body{margin:0;padding:0;}body{overscroll-behavior:none;}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{colors:{"on-tertiary-container":"#000703","on-primary-fixed":"#07006c","secondary":"#4cd7f6","on-surface-variant":"#c7c4d7","on-primary":"#1000a9","tertiary":"#4edea3","tertiary-fixed-dim":"#4edea3","surface-container-lowest":"#0c0e12","on-secondary-fixed-variant":"#004e5c","primary-fixed-dim":"#c0c1ff","surface-dim":"#111318","on-primary-container":"#0d0096","secondary-fixed-dim":"#4cd7f6","surface-tint":"#c0c1ff","inverse-surface":"#e2e2e8","on-secondary":"#003640","on-error":"#690005","surface-bright":"#37393e","on-surface":"#e2e2e8","on-secondary-container":"#00424e","error-container":"#93000a","on-tertiary-fixed":"#002113","on-primary-fixed-variant":"#2f2ebe","surface-container-low":"#1a1c20","on-tertiary":"#003824","on-tertiary-fixed-variant":"#005236","tertiary-container":"#00885d","surface-container-highest":"#333539","primary-container":"#8083ff","surface-container-high":"#282a2e","primary-fixed":"#e1e0ff","tertiary-fixed":"#6ffbbe","inverse-on-surface":"#2f3035","secondary-container":"#03b5d3","error":"#ffb4ab","background":"#111318","on-error-container":"#ffdad6","inverse-primary":"#494bd6","surface-container":"#1e2024","secondary-fixed":"#acedff","outline":"#908fa0","on-secondary-fixed":"#001f26","surface":"#111318","outline-variant":"#464554","on-background":"#e2e2e8","surface-variant":"#333539","primary":"#c0c1ff"},borderRadius:{"DEFAULT":"0.125rem","lg":"0.25rem","xl":"0.5rem","full":"0.75rem"},spacing:{"space-md":"0.75rem","space-xl":"2rem","space-base":"1rem","space-2xs":"0.125rem","gutter":"1.5rem","gutter-mobile":"1rem","space-lg":"1.5rem","margin-mobile":"1rem","space-2xl":"3rem","space-sm":"0.5rem","margin":"2rem","space-xs":"0.25rem"},fontFamily:{"headline-lg-mobile":["Geist"],"body-md":["Geist"],"body-sm":["Geist"],"mono-pairing-code-mobile":["JetBrains Mono"],"mono-telemetry":["JetBrains Mono"],"label-caps":["JetBrains Mono"],"display-hero-mobile":["Geist"],"body-lg":["Geist"],"display-hero":["Geist"],"mono-data":["JetBrains Mono"],"headline-lg":["Geist"],"headline-md":["Geist"],"mono-pairing-code":["JetBrains Mono"]},fontSize:{"headline-lg-mobile":["24px",{"lineHeight":"32px","letterSpacing":"-0.02em","fontWeight":"500"}],"body-md":["14px",{"lineHeight":"20px","letterSpacing":"-0.005em","fontWeight":"400"}],"body-sm":["12px",{"lineHeight":"16px","letterSpacing":"0","fontWeight":"400"}],"mono-pairing-code-mobile":["22px",{"lineHeight":"32px","letterSpacing":"0.1em","fontWeight":"500"}],"mono-telemetry":["11px",{"lineHeight":"14px","letterSpacing":"0.04em","fontWeight":"500"}],"label-caps":["10px",{"lineHeight":"14px","letterSpacing":"0.08em","fontWeight":"600"}],"display-hero-mobile":["32px",{"lineHeight":"40px","letterSpacing":"-0.025em","fontWeight":"600"}],"body-lg":["16px",{"lineHeight":"24px","letterSpacing":"-0.01em","fontWeight":"400"}],"display-hero":["48px",{"lineHeight":"56px","letterSpacing":"-0.03em","fontWeight":"600"}],"mono-data":["13px",{"lineHeight":"18px","letterSpacing":"-0.01em","fontWeight":"400"}],"headline-lg":["30px",{"lineHeight":"38px","letterSpacing":"-0.02em","fontWeight":"500"}],"headline-md":["20px",{"lineHeight":"28px","letterSpacing":"-0.015em","fontWeight":"500"}],"mono-pairing-code":["32px",{"lineHeight":"40px","letterSpacing":"0.15em","fontWeight":"500"}]}}}};</script></head><body class="bg-surface font-body-md text-on-surface antialiased min-h-screen flex flex-col justify-between selection:bg-primary-container selection:text-on-primary-container"><header class="fixed top-0 left-0 right-0 z-50 bg-surface-container-lowest/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.3)]"><div class="h-16 w-full max-w-7xl mx-auto px-gutter flex items-center justify-between gap-space-base"><div class="flex items-center gap-space-md"><img alt="GhostShare Logo" class="h-8 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/AEtjO1WRvyCF4PQkXtS-qcCBC-OIgTRwQfnOOBT0FJCTsbVp-xb9sDA3V2p7mAJEUSSE_vtQLp0WQD3ic-uB3lt-ImIQD-ngviU4pwza4VSWF_f-U_btkLcuFvd_xJtgmNX-kgSDyo3XGCfFnqJcDnXtFjUrSYrHj8tLNbuyF8Gmm0jskKMUR7FO2JLHI72qO23ArntJsf0-nsqvX51tjVgmnO4Xir1pcBAK63SwyagfSQCzqT7X8rHD-TOYo6nu"/><div class="flex items-center gap-space-xs"><span class="font-headline-md text-headline-md tracking-tight font-medium text-on-surface">GhostShare</span><span class="px-space-xs py-space-2xs rounded bg-surface-container-high text-on-surface-variant font-label-caps text-label-caps uppercase">v1.0 • R2 Direct</span></div><div class="hidden md:flex items-center gap-space-xs px-space-sm py-space-2xs rounded-full bg-surface-container-low shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"><span class="h-1.5 w-1.5 rounded-full bg-tertiary animate-pulse"></span><span class="font-mono-telemetry text-mono-telemetry text-tertiary">Workers KV Online • Low Latency</span></div></div><div class="flex items-center"><nav class="flex items-center bg-surface-container-low p-space-2xs rounded-xl" data-active-classes="bg-surface-container-highest text-on-surface font-medium shadow-sm"><a class="px-space-base py-space-sm rounded-lg font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="receive-files" href="#">Receive Files (Active Session)</a><a aria-current="page" class="px-space-base py-space-sm rounded-lg transition-colors bg-surface-container-highest text-on-surface font-medium shadow-sm" data-path="send-files" href="#">Send Files (Pair & Upload)</a></nav></div><div class="flex items-center gap-space-md"><a class="flex items-center gap-space-xs px-space-sm py-space-xs rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-colors font-body-sm text-body-sm" data-path="security-and-specs" href="#"><span class="material-symbols-outlined text-[18px]">shield_lock</span><span class="hidden lg:inline">Security & Specs</span></a><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="w-full pt-16 flex-1 bg-surface"><div class="flex flex-col w-full">
+<div class="relative w-full overflow-hidden">
+<div class="absolute inset-0 pointer-events-none opacity-20">
+<div class="absolute -top-32 left-1/2 -translate-x-1/2 w-[700px] h-[340px] bg-secondary/15 rounded-full blur-[120px]"></div>
+<div class="absolute top-64 right-10 w-[420px] h-[300px] bg-primary-container/10 rounded-full blur-[100px]"></div>
+</div>
+<div class="relative w-full max-w-7xl mx-auto px-gutter py-space-xl flex flex-col gap-space-lg">
+<!-- Top Telemetry & Session Header -->
+<section class="flex flex-col md:flex-row md:items-center justify-between gap-space-base p-space-base rounded-xl bg-surface-container-low shadow-sm">
+<div class="flex flex-wrap items-center gap-space-md">
+<div class="flex items-center gap-space-sm bg-surface-container-highest px-space-md py-space-xs rounded-lg">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase">Pairing Channel</span>
+<div class="flex items-center gap-space-2xs text-secondary font-mono-telemetry text-mono-telemetry font-bold tracking-wider">
+<span class="inline-block w-2 h-2 rounded-full bg-secondary animate-ping"></span>
+<span>4829</span>
+<span class="text-outline-variant">-</span>
+<span>7105</span>
+</div>
+</div>
+<div class="flex items-center gap-space-xs px-space-sm py-space-xs rounded-lg bg-surface-container-high text-on-surface">
+<span class="material-symbols-outlined text-[16px] text-tertiary">laptop_mac</span>
+<span class="font-body-sm text-body-sm font-medium">MacBook Pro</span>
+<span class="font-label-caps text-label-caps text-tertiary bg-tertiary-container/30 px-space-xs py-space-2xs rounded">Target Active</span>
+</div>
+</div>
+<div class="flex items-center gap-space-lg font-mono-telemetry text-mono-telemetry">
+<div class="flex items-center gap-space-xs text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px] text-secondary">cloud_sync</span>
+<span>Cloudflare R2 Direct Pipe</span>
+</div>
+<div class="flex items-center gap-space-xs text-on-surface-variant bg-surface-container px-space-sm py-space-xs rounded">
+<span class="material-symbols-outlined text-[16px] text-error">timer</span>
+<span class="text-on-surface">SESSION TTL:</span>
+<span class="text-primary font-bold" id="session-countdown">57:12 remaining</span>
+</div>
+</div>
+</section>
+<!-- Main Dual Column Workspace -->
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-space-lg items-start">
+<!-- Left: Upload & File Queue Workspace (8 cols) -->
+<div class="lg:col-span-8 flex flex-col gap-space-lg">
+<!-- Drop Area -->
+<div class="relative group cursor-pointer transition-all duration-300 rounded-xl bg-surface-container-low p-space-xl flex flex-col items-center justify-center text-center shadow-md hover:bg-surface-container" id="drop-target">
+<div class="w-14 h-14 rounded-full bg-surface-container-highest flex items-center justify-center mb-space-base shadow-inner group-hover:scale-105 transition-transform">
+<span class="material-symbols-outlined text-secondary text-[28px]">upload_file</span>
+</div>
+<h2 class="font-headline-md text-headline-md text-on-surface mb-space-xs">
+              Stage Files for Instant Payload Emission
+            </h2>
+<p class="font-body-md text-body-md text-on-surface-variant max-w-lg mb-space-md">
+              Drag files here, browse device, or paste (<kbd class="px-space-xs py-space-2xs bg-surface-container-highest text-on-surface rounded font-mono-telemetry text-mono-telemetry">Ctrl+V</kbd> / <kbd class="px-space-xs py-space-2xs bg-surface-container-highest text-on-surface rounded font-mono-telemetry text-mono-telemetry">⌘+V</kbd>) screenshots directly.
+            </p>
+<div class="flex items-center gap-space-base font-body-sm text-body-sm">
+<button class="px-space-base py-space-sm rounded-lg bg-surface-container-highest text-on-surface hover:bg-primary hover:text-on-primary transition-all font-medium flex items-center gap-space-xs shadow-sm" type="button">
+<span class="material-symbols-outlined text-[18px]">folder_open</span>
+<span>Select from Disk</span>
+</button>
+<span class="text-outline-variant font-mono-telemetry text-mono-telemetry">Client-side SHA-256 Verified</span>
+</div>
+</div>
+<!-- Staged Queue Manifest -->
+<div class="rounded-xl bg-surface-container-low p-space-base flex flex-col gap-space-md shadow-sm">
+<div class="flex items-center justify-between px-space-xs">
+<div class="flex items-center gap-space-xs">
+<span class="font-headline-md text-headline-md text-on-surface">Payload Queue</span>
+<span class="px-space-xs py-space-2xs rounded bg-surface-container-high text-secondary font-mono-telemetry text-mono-telemetry font-medium" id="queue-badge">4 items</span>
+</div>
+<button class="font-body-sm text-body-sm text-on-surface-variant hover:text-error transition-colors flex items-center gap-space-2xs" id="clear-all-btn">
+<span class="material-symbols-outlined text-[16px]">clear_all</span>
+<span>Clear Staging</span>
+</button>
+</div>
+<!-- File Item Rows -->
+<div class="flex flex-col gap-space-xs" id="file-queue-container">
+<!-- File 1: JSON -->
+<div class="file-item group flex items-center justify-between p-space-sm rounded-lg bg-surface-container transition-all hover:bg-surface-container-high" data-size="0.142">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-secondary text-[22px]">data_object</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-on-surface font-medium truncate">design-system-tokens-v2.json</span>
+<div class="flex items-center gap-space-sm font-mono-telemetry text-mono-telemetry text-on-surface-variant">
+<span class="text-secondary">application/json</span>
+<span>•</span>
+<span>142 KB</span>
+<span>•</span>
+<span class="text-tertiary flex items-center gap-space-2xs">
+<span class="material-symbols-outlined text-[14px]">check_circle</span> Ready
+                      </span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-space-base">
+<span class="hidden sm:inline font-mono-telemetry text-mono-telemetry text-outline-variant bg-surface-container-lowest px-space-xs py-space-2xs rounded">hash: d3a9e1</span>
+<button class="remove-btn p-space-xs text-on-surface-variant hover:text-error rounded hover:bg-surface-container-lowest transition-colors" title="Remove payload segment" type="button">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<!-- File 2: PDF -->
+<div class="file-item group flex items-center justify-between p-space-sm rounded-lg bg-surface-container transition-all hover:bg-surface-container-high" data-size="18.4">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-error text-[22px]">picture_as_pdf</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-on-surface font-medium truncate">client-presentation-deck.pdf</span>
+<div class="flex items-center gap-space-sm font-mono-telemetry text-mono-telemetry text-on-surface-variant">
+<span class="text-error">application/pdf</span>
+<span>•</span>
+<span>18.4 MB</span>
+<span>•</span>
+<span class="text-tertiary flex items-center gap-space-2xs">
+<span class="material-symbols-outlined text-[14px]">check_circle</span> Ready
+                      </span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-space-base">
+<span class="hidden sm:inline font-mono-telemetry text-mono-telemetry text-outline-variant bg-surface-container-lowest px-space-xs py-space-2xs rounded">hash: fa8190</span>
+<button class="remove-btn p-space-xs text-on-surface-variant hover:text-error rounded hover:bg-surface-container-lowest transition-colors" title="Remove payload segment" type="button">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<!-- File 3: Video -->
+<div class="file-item group flex items-center justify-between p-space-sm rounded-lg bg-surface-container transition-all hover:bg-surface-container-high" data-size="142.6">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-primary text-[22px]">movie</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-on-surface font-medium truncate">raw-b-roll-footage-4k.mov</span>
+<div class="flex items-center gap-space-sm font-mono-telemetry text-mono-telemetry text-on-surface-variant">
+<span class="text-primary">video/quicktime</span>
+<span>•</span>
+<span>142.6 MB</span>
+<span>•</span>
+<span class="text-tertiary flex items-center gap-space-2xs">
+<span class="material-symbols-outlined text-[14px]">check_circle</span> Ready
+                      </span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-space-base">
+<span class="hidden sm:inline font-mono-telemetry text-mono-telemetry text-outline-variant bg-surface-container-lowest px-space-xs py-space-2xs rounded">hash: 99c72e</span>
+<button class="remove-btn p-space-xs text-on-surface-variant hover:text-error rounded hover:bg-surface-container-lowest transition-colors" title="Remove payload segment" type="button">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<!-- File 4: Archive -->
+<div class="file-item group flex items-center justify-between p-space-sm rounded-lg bg-surface-container transition-all hover:bg-surface-container-high" data-size="32.1">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-10 h-10 rounded-lg bg-surface-container-highest flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-secondary text-[22px]">folder_zip</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-on-surface font-medium truncate">brand-assets-lossless.zip</span>
+<div class="flex items-center gap-space-sm font-mono-telemetry text-mono-telemetry text-on-surface-variant">
+<span class="text-secondary">application/zip</span>
+<span>•</span>
+<span>32.1 MB</span>
+<span>•</span>
+<span class="text-tertiary flex items-center gap-space-2xs">
+<span class="material-symbols-outlined text-[14px]">check_circle</span> Ready
+                      </span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-space-base">
+<span class="hidden sm:inline font-mono-telemetry text-mono-telemetry text-outline-variant bg-surface-container-lowest px-space-xs py-space-2xs rounded">hash: 10bf55</span>
+<button class="remove-btn p-space-xs text-on-surface-variant hover:text-error rounded hover:bg-surface-container-lowest transition-colors" title="Remove payload segment" type="button">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Capacity Progress Telemetry Meter -->
+<div class="mt-space-sm pt-space-md bg-surface-container-low flex flex-col gap-space-xs">
+<div class="flex items-center justify-between font-mono-telemetry text-mono-telemetry">
+<span class="text-on-surface-variant flex items-center gap-space-2xs">
+<span class="material-symbols-outlined text-[14px] text-secondary">memory</span>
+<span>CAPACITY ALLOCATION</span>
+</span>
+<span class="text-on-surface font-medium" id="capacity-text">193.2 MB of 250 MB used (77%)</span>
+</div>
+<div class="w-full h-2 rounded-full bg-surface-container-highest overflow-hidden relative">
+<div class="h-full bg-secondary transition-all duration-500 rounded-full" id="capacity-fill" style="width: 77.28%;"></div>
+</div>
+<div class="flex items-center justify-between font-mono-telemetry text-mono-telemetry text-on-surface-variant">
+<span id="remaining-text">56.8 MB remaining allocation</span>
+<span class="text-outline-variant">Hard Cap: 250.0 MB</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Right: Expiration Rules & Trigger Panel (4 cols) -->
+<div class="lg:col-span-4 flex flex-col gap-space-lg">
+<!-- Ephemeral TTL Configuration Card -->
+<div class="rounded-xl bg-surface-container-low p-space-base flex flex-col gap-space-md shadow-sm">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-xs text-on-surface">
+<span class="material-symbols-outlined text-secondary text-[20px]">auto_delete</span>
+<h3 class="font-headline-md text-headline-md">Self-Destruct TTL</h3>
+</div>
+<span class="font-label-caps text-label-caps text-secondary bg-surface-container px-space-xs py-space-2xs rounded uppercase">Zero-Trace</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant">
+              Targeted Cloudflare R2 files purge irreversibly across all edge data nodes once interval lapses.
+            </p>
+<!-- Duration Selector Options -->
+<div class="flex flex-col gap-space-xs" id="ttl-options">
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="30m"/>
+<span class="font-body-md text-body-md text-on-surface">30 min</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Fast Ephemeral</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container-highest cursor-pointer transition-colors shadow-sm">
+<div class="flex items-center gap-space-sm">
+<input checked="" class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="1h"/>
+<span class="font-body-md text-body-md text-secondary font-medium">1 hour (Default)</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-secondary">Recommended</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="2h"/>
+<span class="font-body-md text-body-md text-on-surface">2 hours</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Session Window</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="3h"/>
+<span class="font-body-md text-body-md text-on-surface">3 hours</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Standard</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="6h"/>
+<span class="font-body-md text-body-md text-on-surface">6 hours</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Extended</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="12h"/>
+<span class="font-body-md text-body-md text-on-surface">12 hours</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Working Day</span>
+</label>
+<label class="flex items-center justify-between p-space-sm rounded-lg bg-surface-container hover:bg-surface-container-high cursor-pointer transition-colors">
+<div class="flex items-center gap-space-sm">
+<input class="accent-secondary w-4 h-4 cursor-pointer" name="ttl" type="radio" value="24h"/>
+<span class="font-body-md text-body-md text-on-surface">24 hours</span>
+</div>
+<span class="font-mono-telemetry text-mono-telemetry text-on-surface-variant">Maximum Retention</span>
+</label>
+</div>
+<!-- Locking Warning Alert -->
+<div class="p-space-sm rounded-lg bg-surface-container flex items-start gap-space-sm">
+<span class="material-symbols-outlined text-secondary text-[20px] shrink-0 mt-0.5">lock</span>
+<div class="flex flex-col gap-space-2xs">
+<span class="font-label-caps text-label-caps uppercase text-secondary font-bold">Locking Warning</span>
+<p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">
+                  Expiry locks permanently the moment upload starts to ensure batch link consistency.
+                </p>
+</div>
+</div>
+</div>
+<!-- Upload Execution Card -->
+<div class="rounded-xl bg-surface-container-low p-space-base flex flex-col gap-space-md shadow-sm">
+<div class="flex flex-col gap-space-2xs">
+<div class="flex items-center justify-between font-mono-telemetry text-mono-telemetry">
+<span class="text-on-surface-variant">SECURITY PROTOCOL</span>
+<span class="text-tertiary">AES-GCM-256</span>
+</div>
+<div class="flex items-center justify-between font-mono-telemetry text-mono-telemetry">
+<span class="text-on-surface-variant">TARGET PEER</span>
+<span class="text-on-surface">MacBook Pro (Active)</span>
+</div>
+<div class="flex items-center justify-between font-mono-telemetry text-mono-telemetry">
+<span class="text-on-surface-variant">STORAGE ENGINE</span>
+<span class="text-secondary">R2 Object Storage</span>
+</div>
+</div>
+<!-- Action Button -->
+<button class="w-full py-space-md px-space-base rounded-xl bg-secondary text-on-secondary font-headline-md text-headline-md font-semibold hover:bg-secondary-fixed transition-all flex items-center justify-center gap-space-sm shadow-md active:scale-[0.99] group" id="upload-cta" type="button">
+<span class="material-symbols-outlined text-[24px] text-on-secondary group-hover:rotate-12 transition-transform">cloud_upload</span>
+<span id="cta-label">Begin Direct Upload (4 files • 193.2 MB)</span>
+</button>
+<div class="flex items-center justify-center gap-space-xs font-mono-telemetry text-mono-telemetry text-on-surface-variant text-center">
+<span class="material-symbols-outlined text-[14px] text-tertiary">lock</span>
+<span>Encrypted in memory prior to edge pipeline flush</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<script>
+    (function () {
+      let files = [
+        { name: 'design-system-tokens-v2.json', size: 0.142 },
+        { name: 'client-presentation-deck.pdf', size: 18.4 },
+        { name: 'raw-b-roll-footage-4k.mov', size: 142.6 },
+        { name: 'brand-assets-lossless.zip', size: 32.1 }
+      ];
+
+      const maxCapacity = 250.0;
+      const queueBadge = document.getElementById('queue-badge');
+      const capacityText = document.getElementById('capacity-text');
+      const capacityFill = document.getElementById('capacity-fill');
+      const remainingText = document.getElementById('remaining-text');
+      const ctaLabel = document.getElementById('cta-label');
+      const uploadCta = document.getElementById('upload-cta');
+      const fileContainer = document.getElementById('file-queue-container');
+      const clearBtn = document.getElementById('clear-all-btn');
+
+      function updateTelemetry() {
+        const totalSize = files.reduce((acc, f) => acc + f.size, 0);
+        const count = files.length;
+        const percentage = Math.min(100, (totalSize / maxCapacity) * 100);
+        const remaining = Math.max(0, maxCapacity - totalSize);
+
+        if (queueBadge) queueBadge.textContent = `${count} ${count === 1 ? 'item' : 'items'}`;
+        if (capacityText) capacityText.textContent = `${totalSize.toFixed(1)} MB of ${maxCapacity} MB used (${Math.round(percentage)}%)`;
+        if (remainingText) remainingText.textContent = `${remaining.toFixed(1)} MB remaining allocation`;
+        
+        if (capacityFill) {
+          capacityFill.style.width = `${percentage}%`;
+          if (totalSize > maxCapacity) {
+            capacityFill.classList.remove('bg-secondary');
+            capacityFill.classList.add('bg-error');
+          } else {
+            capacityFill.classList.remove('bg-error');
+            capacityFill.classList.add('bg-secondary');
+          }
+        }
+
+        if (ctaLabel) {
+          ctaLabel.textContent = count > 0 
+            ? `Begin Direct Upload (${count} ${count === 1 ? 'file' : 'files'} • ${totalSize.toFixed(1)} MB)`
+            : 'Queue Empty (Select Files)';
+        }
+
+        if (uploadCta) {
+          if (count === 0 || totalSize > maxCapacity) {
+            uploadCta.classList.add('opacity-50', 'pointer-events-none');
+          } else {
+            uploadCta.classList.remove('opacity-50', 'pointer-events-none');
+          }
+        }
+      }
+
+      function attachRemoveHandlers() {
+        const rows = fileContainer.querySelectorAll('.file-item');
+        rows.forEach((row, idx) => {
+          const btn = row.querySelector('.remove-btn');
+          if (btn) {
+            btn.onclick = function (e) {
+              e.stopPropagation();
+              row.remove();
+              files.splice(idx, 1);
+              attachRemoveHandlers();
+              updateTelemetry();
+            };
+          }
+        });
+      }
+
+      if (clearBtn) {
+        clearBtn.onclick = function () {
+          files = [];
+          fileContainer.innerHTML = `
+            <div class="py-space-xl text-center text-on-surface-variant font-mono-telemetry text-mono-telemetry">
+              Payload queue empty. Drag files into staging area above.
+            </div>
+          `;
+          updateTelemetry();
+        };
+      }
+
+      // TTL radio active container sync
+      const ttlInputs = document.querySelectorAll('input[name="ttl"]');
+      ttlInputs.forEach(input => {
+        input.addEventListener('change', () => {
+          ttlInputs.forEach(i => {
+            const container = i.closest('label');
+            const spanText = container.querySelector('.font-body-md');
+            if (i.checked) {
+              container.classList.add('bg-surface-container-highest');
+              container.classList.remove('bg-surface-container');
+              if (spanText) {
+                spanText.classList.add('text-secondary', 'font-medium');
+                spanText.classList.remove('text-on-surface');
+              }
+            } else {
+              container.classList.remove('bg-surface-container-highest');
+              container.classList.add('bg-surface-container');
+              if (spanText) {
+                spanText.classList.remove('text-secondary', 'font-medium');
+                spanText.classList.add('text-on-surface');
+              }
+            }
+          });
+        });
+      });
+
+      // Session Countdown logic
+      let secondsLeft = 57 * 60 + 12;
+      const countdownEl = document.getElementById('session-countdown');
+      setInterval(() => {
+        if (secondsLeft > 0) {
+          secondsLeft--;
+          const m = Math.floor(secondsLeft / 60);
+          const s = secondsLeft % 60;
+          if (countdownEl) {
+            countdownEl.textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')} remaining`;
+          }
+        }
+      }, 1000);
+
+      // Drag and drop zone feedback
+      const dropTarget = document.getElementById('drop-target');
+      if (dropTarget) {
+        ['dragenter', 'dragover'].forEach(name => {
+          dropTarget.addEventListener(name, (e) => {
+            e.preventDefault();
+            dropTarget.classList.add('bg-surface-container-highest');
+          });
+        });
+        ['dragleave', 'drop'].forEach(name => {
+          dropTarget.addEventListener(name, (e) => {
+            e.preventDefault();
+            dropTarget.classList.remove('bg-surface-container-highest');
+          });
+        });
+      }
+
+      // Initial binding
+      attachRemoveHandlers();
+      updateTelemetry();
+    })();
+  </script>
+</div></main><footer class="w-full bg-surface-container-lowest/90 backdrop-blur-md shadow-[0_-1px_8px_rgba(0,0,0,0.2)]"><div class="max-w-7xl mx-auto px-gutter py-space-md flex flex-col md:flex-row items-center justify-between gap-space-base text-on-surface-variant"><div class="flex flex-wrap items-center gap-space-xs font-mono-telemetry text-mono-telemetry text-on-surface-variant/80"><span class="text-tertiary">●</span><span>Zero Proxy Overhead</span><span class="text-outline-variant">•</span><span>Signed R2 URLs</span><span class="text-outline-variant">•</span><span>Ephemeral Storage (Auto-delete)</span><span class="text-outline-variant">•</span><span class="text-secondary">Max 250 MB/Transfer</span></div><div class="flex items-center gap-space-lg font-body-sm text-body-sm"><a class="hover:text-on-surface transition-colors" data-path="privacy-architecture" href="#">Privacy Architecture</a><a class="flex items-center gap-space-2xs hover:text-on-surface transition-colors" href="https://github.com" rel="noopener noreferrer" target="_blank"><span class="material-symbols-outlined text-[16px]">code</span><span>GitHub</span></a></div></div></footer></body></html>

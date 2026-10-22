@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ghostshare",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+
+  // Created with: npx wrangler kv namespace create SESSIONS_KV
+  // Paste the returned id below.
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS_KV",
+      "id": "<YOUR_KV_NAMESPACE_ID>"
+    }
+  ],
+
+  // Non-secret vars. Set the real values with `wrangler secret put <NAME>`
+  // instead of here for anything sensitive (access key, secret key).
+  "vars": {
+    "R2_ACCOUNT_ID": "<YOUR_CLOUDFLARE_ACCOUNT_ID>",
+    "R2_BUCKET_NAME": "ghostshare-files"
+  }
+}
