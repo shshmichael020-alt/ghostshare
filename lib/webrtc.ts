@@ -25,7 +25,7 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
  * Gathering candidates before sending SDP embeds all host, STUN (srflx), and TURN (relay)
  * candidates directly into the offer/answer SDP, avoiding KV race conditions.
  */
-export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 1500): Promise<void> {
+export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
   if (pc.iceGatheringState === "complete") return;
   return new Promise<void>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | null = null;

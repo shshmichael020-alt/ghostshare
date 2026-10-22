@@ -128,11 +128,9 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       const pc = createPeerConnection();
       pcRef.current = pc;
 
-      // Handle ICE candidates
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          sendSignalMessage(codeToConnect, "sender", "receiver", "candidate", event.candidate.toJSON());
-        }
+      // ICE candidates are pre-gathered into the SDP offer via waitForIceGathering
+      pc.onicecandidate = () => {
+        // Complete candidates are already embedded directly in the offer SDP
       };
 
       // Handle ICE connection state changes with Auto-Reconnect
@@ -204,10 +202,15 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       // 5. Create & gather SDP offer with full candidates
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await waitForIceGathering(pc, 1500);
+      await waitForIceGathering(pc, 2000);
 
-      const finalOffer = pc.localDescription || offer;
-      await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", finalOffer);
+      const finalOffer = pc.localDescription
+        ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+        : { type: offer.type, sdp: offer.sdp };
+      const sent = await sendSignalMessage(codeToConnect, "sender", "receiver", "offer", finalOffer);
+      if (!sent) {
+        throw new Error("Could not deliver WebRTC offer. Please confirm receiver code is active.");
+      }
 
       // 6. Safety timeout: cancel if handshake does not complete within 25 seconds
       connectTimeoutRef.current = setTimeout(() => {
@@ -218,7 +221,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         }
       }, 25000);
 
-      // 6. Start signaling poll loop
+      // 7. Start signaling poll loop (responsive 600ms polling)
       pollRef.current = setInterval(async () => {
         try {
           const messages = await fetchSignalMessages(
@@ -231,12 +234,16 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             lastSignalTimestamp.current = Math.max(lastSignalTimestamp.current, msg.timestamp);
 
             if (msg.type === "answer") {
-              const answerDesc = msg.data as RTCSessionDescriptionInit;
-              await pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
+              if (pc.signalingState === "have-local-offer") {
+                const answerDesc = msg.data as RTCSessionDescriptionInit;
+                await pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
+              }
             } else if (msg.type === "candidate") {
               const candidate = msg.data as RTCIceCandidateInit;
               try {
-                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                if (pc.remoteDescription) {
+                  await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                }
               } catch (iceErr) {
                 console.warn("Failed to add ICE candidate:", iceErr);
               }
@@ -248,7 +255,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         } catch {
           // Transient network error
         }
-      }, 1000);
+      }, 600);
 
       return true;
     } catch (e) {

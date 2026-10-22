@@ -139,40 +139,54 @@ export async function postSignalMessage(
   type: SignalMessage["type"],
   data: unknown,
 ): Promise<boolean> {
-  const session = await getSignalingSession(code);
-  if (!session) return false;
+  try {
+    const session = await getSignalingSession(code);
+    if (!session) return false;
 
-  const msg: SignalMessage = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    sender,
-    target,
-    type,
-    data,
-    timestamp: Date.now(),
-  };
+    const msg: SignalMessage = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      sender,
+      target,
+      type,
+      data,
+      timestamp: Date.now(),
+    };
 
-  session.messages.push(msg);
-
-  // Keep message history small (max 50 signaling messages per session)
-  if (session.messages.length > 50) {
-    session.messages.splice(0, session.messages.length - 50);
-  }
-
-  localSessions.set(code, session);
-
-  const kv = getKvBinding();
-  if (kv) {
-    try {
-      const ttl = Math.max(60, Math.round((session.expiresAt - Date.now()) / 1000));
-      await kv.put(`session:${code}`, JSON.stringify(session), { expirationTtl: ttl });
-      // Also write directly to target's dedicated mailbox for immediate cross-PoP delivery
-      await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
-    } catch (err) {
-      console.warn("KV post message error:", err);
+    if (!Array.isArray(session.messages)) {
+      session.messages = [];
     }
-  }
+    session.messages.push(msg);
 
-  return true;
+    // Keep message history small (max 50 signaling messages per session)
+    if (session.messages.length > 50) {
+      session.messages.splice(0, session.messages.length - 50);
+    }
+
+    localSessions.set(code, session);
+
+    const kv = getKvBinding();
+    if (kv) {
+      try {
+        const remainingSec =
+          typeof session.expiresAt === "number"
+            ? Math.round((session.expiresAt - Date.now()) / 1000)
+            : 3600;
+        const ttl = Math.max(60, isNaN(remainingSec) ? 3600 : remainingSec);
+        await kv.put(`session:${code}`, JSON.stringify(session), { expirationTtl: ttl });
+        // Dedicated mailbox for primary offer/answer handshake messages
+        if (type === "offer" || type === "answer") {
+          await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
+        }
+      } catch (err) {
+        console.warn("KV post message error:", err);
+      }
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Critical error in postSignalMessage:", err);
+    return false;
+  }
 }
 
 export async function pollSignalMessages(
@@ -180,31 +194,36 @@ export async function pollSignalMessages(
   forRole: "receiver" | "sender",
   sinceTimestamp: number,
 ): Promise<SignalMessage[]> {
-  const session = await getSignalingSession(code);
-  const foundMessages = new Map<string, SignalMessage>();
+  try {
+    const session = await getSignalingSession(code);
+    const foundMessages = new Map<string, SignalMessage>();
 
-  if (session) {
-    for (const m of session.messages) {
-      if (m.target === forRole && m.timestamp > sinceTimestamp) {
-        foundMessages.set(m.id, m);
+    if (session && Array.isArray(session.messages)) {
+      for (const m of session.messages) {
+        if (m && m.target === forRole && m.timestamp > sinceTimestamp) {
+          foundMessages.set(m.id, m);
+        }
       }
     }
-  }
 
-  // Also check target role's dedicated mailbox in KV
-  const kv = getKvBinding();
-  if (kv) {
-    try {
-      const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
-      if (directMsg && directMsg.timestamp > sinceTimestamp) {
-        foundMessages.set(directMsg.id, directMsg);
+    // Also check target role's dedicated mailbox in KV
+    const kv = getKvBinding();
+    if (kv) {
+      try {
+        const directMsg = await kv.get<SignalMessage>(`sig:${code}:${forRole}`, "json");
+        if (directMsg && directMsg.timestamp > sinceTimestamp) {
+          foundMessages.set(directMsg.id, directMsg);
+        }
+      } catch {
+        // ignored
       }
-    } catch {
-      // ignored
     }
-  }
 
-  return Array.from(foundMessages.values()).sort((a, b) => a.timestamp - b.timestamp);
+    return Array.from(foundMessages.values()).sort((a, b) => a.timestamp - b.timestamp);
+  } catch (err) {
+    console.error("Critical error in pollSignalMessages:", err);
+    return [];
+  }
 }
 
 export async function closeSignalingSession(code: string): Promise<void> {
