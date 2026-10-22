@@ -74,6 +74,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const isConnectingRef = useRef(false);
+  const currentBatchIdRef = useRef<string | null>(null);
 
   const { toasts, push, dismiss } = useToasts();
 
@@ -99,6 +100,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     pendingCandidatesRef.current = [];
     cancelTransferRef.current = false;
     isConnectingRef.current = false;
+    currentBatchIdRef.current = null;
   }, []);
 
   // Set up WebRTC connection to receiver with pairing code
@@ -241,15 +243,24 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           try {
             const msg = JSON.parse(event.data) as WebRTCMessage;
             if (msg.type === "transfer-accept") {
+              if (msg.batchId && currentBatchIdRef.current && msg.batchId !== currentBatchIdRef.current) {
+                console.warn(`Ignoring transfer-accept for mismatched batch ${msg.batchId}`);
+                return;
+              }
               push("Recipient approved transfer! Commencing P2P stream...", "success");
               // Proceed with file streaming
               setTransferPhase("transferring");
             } else if (msg.type === "transfer-decline") {
+              if (msg.batchId && currentBatchIdRef.current && msg.batchId !== currentBatchIdRef.current) {
+                console.warn(`Ignoring transfer-decline for mismatched batch ${msg.batchId}`);
+                return;
+              }
               push(msg.reason ? `Transfer declined: ${msg.reason}` : "Recipient declined the transfer request", "error");
               setTransferPhase("idle");
               setStagedFiles((prev) =>
                 prev.map((f) => (f.status === "requesting" ? { ...f, status: "idle" } : f)),
               );
+              currentBatchIdRef.current = null;
             }
           } catch (e) {
             console.error("Failed to parse incoming control message:", e);
@@ -389,6 +400,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
       if (newItems.length > 0) {
         setStagedFiles((prev) => [...prev, ...newItems]);
+        setTransferPhase((prev) => (prev === "done" ? "idle" : prev));
         push(`Staged ${newItems.length} file${newItems.length > 1 ? "s" : ""}`, "default");
       }
     },
@@ -421,17 +433,28 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
   // Request transfer approval from receiver
   async function triggerTransferRequest() {
-    if (!dcRef.current || dcRef.current.readyState !== "open" || stagedFiles.length === 0) {
-      push("Connection not active or no files staged", "error");
+    if (!dcRef.current || dcRef.current.readyState !== "open") {
+      push("Direct P2P tunnel is not open", "error");
       return;
     }
 
+    // Only stage files that are 'idle' (not already transferred or in-flight)
+    const pendingItems = stagedFilesRef.current.filter((f) => f.status === "idle");
+    if (pendingItems.length === 0) {
+      push("No new files staged for transfer", "default");
+      return;
+    }
+
+    const batchId = "batch_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+    currentBatchIdRef.current = batchId;
+
+    const pendingIds = new Set(pendingItems.map((f) => f.id));
     setTransferPhase("awaiting-approval");
     setStagedFiles((prev) =>
-      prev.map((f) => (f.status === "idle" ? { ...f, status: "requesting" } : f)),
+      prev.map((f) => (pendingIds.has(f.id) ? { ...f, status: "requesting" } : f)),
     );
 
-    const manifestFiles = stagedFiles.map((f) => ({
+    const manifestFiles = pendingItems.map((f) => ({
       id: f.id,
       name: f.name,
       size: f.size,
@@ -440,11 +463,12 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
     const reqMsg: WebRTCMessage = {
       type: "transfer-request",
+      batchId,
       files: manifestFiles,
     };
 
     dcRef.current.send(JSON.stringify(reqMsg));
-    push("Transfer authorization request sent to Recipient...", "default");
+    push(`Transfer authorization request sent for ${manifestFiles.length} file(s)...`, "default");
   }
 
   // Stream staged files once accepted
@@ -457,7 +481,8 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       if (!dcRef.current || dcRef.current.readyState !== "open") return;
 
       cancelTransferRef.current = false;
-      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting" || f.status === "idle");
+      const activeBatchId = currentBatchIdRef.current;
+      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting");
 
       for (const item of pending) {
         if (!isSubscribed || cancelTransferRef.current) break;
@@ -498,9 +523,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       }
 
       if (isSubscribed && !cancelTransferRef.current) {
-        dcRef.current.send(JSON.stringify({ type: "transfer-complete" }));
-        setTransferPhase("done");
-        push("All files transferred to recipient successfully!", "success");
+        dcRef.current.send(JSON.stringify({ type: "transfer-complete", batchId: activeBatchId ?? undefined }));
+        const hasRemainingIdle = stagedFilesRef.current.some((f) => f.status === "idle");
+        setTransferPhase(hasRemainingIdle ? "idle" : "done");
+        currentBatchIdRef.current = null;
+        push("Batch transferred to recipient successfully!", "success");
       }
     }
 
@@ -771,7 +798,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                     {stagedFiles.length} item{stagedFiles.length > 1 ? "s" : ""}
                   </span>
                 </div>
-                {transferPhase === "idle" && (
+                {(transferPhase === "idle" || transferPhase === "done") && (
                   <button
                     onClick={clearAllStaged}
                     className="font-body-sm text-on-surface-variant hover:text-error transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -819,7 +846,26 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                   <Check size={12} /> Transferred
                                 </>
                               )}
-                              {item.status === "error" && (item.error || "Failed")}
+                              {item.status === "error" && (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span>{item.error || "Failed"}</span>
+                                  <button
+                                    onClick={() =>
+                                      setStagedFiles((prev) =>
+                                        prev.map((f) =>
+                                          f.id === item.id
+                                            ? { ...f, status: "idle", error: undefined, progress: 0 }
+                                            : f,
+                                        ),
+                                      )
+                                    }
+                                    className="text-primary hover:underline font-semibold cursor-pointer ml-1"
+                                    type="button"
+                                  >
+                                    Retry
+                                  </button>
+                                </span>
+                              )}
                               {item.status === "uploading" && (
                                 <>
                                   <Loader2 size={12} className="animate-spin" /> Streaming ({item.progress}%)
@@ -834,7 +880,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
                       <button
                         onClick={() => removeStagedItem(item.id)}
-                        disabled={item.status === "uploading"}
+                        disabled={item.status === "uploading" || item.status === "requesting"}
                         className="p-1.5 text-on-surface-variant hover:text-error rounded-lg hover:bg-surface-container-lowest transition-colors cursor-pointer disabled:opacity-30"
                         title="Remove payload segment"
                         type="button"
@@ -932,7 +978,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             {/* Primary Action Button */}
             <button
               onClick={triggerTransferRequest}
-              disabled={stagedFiles.length === 0 || transferPhase !== "idle" || isAllDone}
+              disabled={idleCount === 0 || transferPhase === "awaiting-approval" || transferPhase === "transferring"}
               className="w-full py-3.5 px-4 rounded-xl bg-secondary text-on-secondary font-headline-md font-semibold hover:bg-secondary-fixed transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {transferPhase === "awaiting-approval" ? (
@@ -945,19 +991,22 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                   <Loader2 size={20} className="animate-spin text-on-secondary" />
                   <span>Streaming P2P DataChannel...</span>
                 </>
+              ) : idleCount > 0 ? (
+                <>
+                  <CloudUpload size={20} />
+                  <span>
+                    Begin Direct Transfer ({idleCount} file{idleCount > 1 ? "s" : ""})
+                  </span>
+                </>
               ) : isAllDone ? (
                 <>
                   <Check size={20} />
-                  <span>Transfer Completed</span>
+                  <span>Transfer Completed • Add More Files</span>
                 </>
               ) : (
                 <>
                   <CloudUpload size={20} />
-                  <span>
-                    {idleCount > 0
-                      ? `Begin Direct Transfer (${idleCount} file${idleCount > 1 ? "s" : ""})`
-                      : "Stage Files Above"}
-                  </span>
+                  <span>Stage Files Above</span>
                 </>
               )}
             </button>

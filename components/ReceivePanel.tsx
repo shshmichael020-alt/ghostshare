@@ -63,7 +63,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   const [downloadingAll, setDownloadingAll] = useState(false);
 
   // Transfer approval state
-  const [pendingApproval, setPendingApproval] = useState<{ files: TransferManifestFile[] } | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    batchId?: string;
+    files: TransferManifestFile[];
+  } | null>(null);
 
   // In-flight receiving file state
   const [activeReceiving, setActiveReceiving] = useState<{
@@ -138,7 +141,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           const msg = JSON.parse(event.data) as WebRTCMessage;
 
           if (msg.type === "transfer-request") {
-            setPendingApproval({ files: msg.files });
+            setPendingApproval({ batchId: msg.batchId, files: msg.files });
             push(`Sender requested to transfer ${msg.files.length} file(s)`, "default");
           } else if (msg.type === "file-start") {
             currentMetaRef.current = {
@@ -234,7 +237,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             channel.send(JSON.stringify(ackMsg));
           } else if (msg.type === "transfer-complete") {
             setActiveReceiving(null);
-            push("All files transferred successfully!", "success");
+            setPendingApproval(null);
+            push("Batch transferred successfully!", "success");
           }
         } catch (e) {
           console.error("Failed to parse data channel message:", e);
@@ -527,7 +531,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       push("Connection not ready", "error");
       return;
     }
-    const acceptMsg: WebRTCMessage = { type: "transfer-accept" };
+    const acceptMsg: WebRTCMessage = {
+      type: "transfer-accept",
+      batchId: pendingApproval?.batchId,
+    };
     dcRef.current.send(JSON.stringify(acceptMsg));
     push("Transfer accepted. Streaming directly to local storage...", "success");
     setPendingApproval(null);
@@ -537,6 +544,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     if (dcRef.current && dcRef.current.readyState === "open") {
       const declineMsg: WebRTCMessage = {
         type: "transfer-decline",
+        batchId: pendingApproval?.batchId,
         reason: "Declined by recipient",
       };
       dcRef.current.send(JSON.stringify(declineMsg));

@@ -42,17 +42,17 @@ export interface TransferManifestFile {
 }
 
 export type WebRTCMessage =
-  | { type: "transfer-request"; files: TransferManifestFile[] }
-  | { type: "transfer-accept" }
-  | { type: "transfer-decline"; reason?: string }
-  | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number }
+  | { type: "transfer-request"; files: TransferManifestFile[]; batchId?: string }
+  | { type: "transfer-accept"; batchId?: string }
+  | { type: "transfer-decline"; reason?: string; batchId?: string }
+  | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number; batchId?: string }
   | { type: "file-ready"; id: string }
   | { type: "file-end"; id: string }
   | { type: "file-ack"; id: string }
   | { type: "file-error"; id: string; error: string }
   | { type: "resume-query"; id: string }
   | { type: "resume-ack"; id: string; receivedBytes: number }
-  | { type: "transfer-complete" };
+  | { type: "transfer-complete"; batchId?: string };
 
 /**
  * Creates an RTCPeerConnection with public STUN servers and standard SCTP configuration.
