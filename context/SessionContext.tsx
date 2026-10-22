@@ -1,0 +1,1255 @@
+"use client";
+
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  ReactNode,
+} from "react";
+import {
+  createPeerConnection,
+  waitForIceGathering,
+  streamFileOverDataChannel,
+  decodeBinaryFrame,
+  WebRTCMessage,
+  TransferManifestFile,
+  DATA_CHANNEL_LABELS,
+  triggerIceRestart,
+  sendSignalMessage,
+  fetchSignalMessages,
+} from "@/lib/webrtc";
+import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
+import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
+import ToastStack from "@/components/ToastStack";
+import { useToasts } from "@/lib/useToasts";
+
+export type SessionMode = "receive" | "send" | "dual";
+
+export interface StagedItem {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  progress: number;
+  status: "idle" | "requesting" | "uploading" | "done" | "error";
+  error?: string;
+  batchId?: string;
+}
+
+export interface ReceivedFileItem {
+  id: string;
+  name: string;
+  size: number;
+  downloadUrl: string;
+  blob: File | Blob;
+  receivedAt: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  sender: "me" | "peer";
+  senderName: string;
+  text: string;
+  timestamp: number;
+}
+
+export interface PendingInboundApproval {
+  batchId: string;
+  files: TransferManifestFile[];
+}
+
+export interface ActiveReceivingItem {
+  id: string;
+  name: string;
+  size: number;
+  receivedBytes: number;
+  batchId?: string;
+}
+
+export interface SessionContextType {
+  // Mode & navigation
+  mode: SessionMode;
+  setMode: (mode: SessionMode) => void;
+
+  // Session metadata & connection
+  role: "creator" | "joiner" | null;
+  code: string | null;
+  sessionToken: string | null;
+  connStatus: "idle" | "awaiting" | "connecting" | "connected" | "reconnecting" | "failed" | "disconnected";
+  error: string | null;
+  natWarning: string | null;
+  remainingTtl: number | null;
+  initialTtl: number;
+  copiedLink: boolean;
+
+  // Connection management
+  startHostSession: (ttlSeconds?: number) => Promise<string | null>;
+  joinGuestSession: (codeToJoin: string) => Promise<boolean>;
+  disconnectSession: () => void;
+  updateExpiryWindow: (newTtlSeconds: number) => Promise<void>;
+  copyLink: () => void;
+  shareLink: () => Promise<void>;
+
+  // Outbound transfer (Send)
+  stagedFiles: StagedItem[];
+  outboundPhase: "idle" | "awaiting-approval" | "transferring" | "done";
+  handleFiles: (files: FileList | File[]) => void;
+  removeStagedItem: (id: string) => void;
+  clearAllStaged: () => void;
+  triggerTransferRequest: () => Promise<void>;
+  retryFailedFile: (id: string) => void;
+
+  // Inbound transfer (Receive)
+  pendingApproval: PendingInboundApproval | null;
+  handleAcceptTransfer: () => void;
+  handleDeclineTransfer: () => void;
+  activeReceiving: ActiveReceivingItem | null;
+  receivedFiles: ReceivedFileItem[];
+  downloadAllFiles: () => Promise<void>;
+  downloadSingleFile: (file: ReceivedFileItem) => void;
+
+  // Ephemeral Live Chat
+  messages: ChatMessage[];
+  unreadCount: number;
+  isChatOpen: boolean;
+  toggleChat: () => void;
+  setIsChatOpen: (open: boolean) => void;
+  sendMessage: (text: string) => boolean;
+  markChatRead: () => void;
+
+  // UI Toast helpers
+  pushToast: (msg: string, type?: "default" | "success" | "error") => void;
+}
+
+const SessionContext = createContext<SessionContextType | null>(null);
+
+export function useGhostSession(): SessionContextType {
+  const ctx = useContext(SessionContext);
+  if (!ctx) {
+    throw new Error("useGhostSession must be used within a SessionProvider");
+  }
+  return ctx;
+}
+
+export function SessionProvider({
+  children,
+  initialMode = "receive",
+}: {
+  children: ReactNode;
+  initialMode?: SessionMode;
+}) {
+  const [mode, setMode] = useState<SessionMode>(initialMode);
+  const [role, setRole] = useState<"creator" | "joiner" | null>(null);
+  const [code, setCode] = useState<string | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [connStatus, setConnStatus] = useState<
+    "idle" | "awaiting" | "connecting" | "connected" | "reconnecting" | "failed" | "disconnected"
+  >("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [natWarning, setNatWarning] = useState<string | null>(null);
+  const [remainingTtl, setRemainingTtl] = useState<number | null>(null);
+  const [initialTtl, setInitialTtl] = useState<number>(DEFAULT_TTL_SECONDS);
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
+
+  // Outbound state
+  const [stagedFiles, setStagedFiles] = useState<StagedItem[]>([]);
+  const stagedFilesRef = useRef<StagedItem[]>([]);
+  useEffect(() => {
+    stagedFilesRef.current = stagedFiles;
+  }, [stagedFiles]);
+
+  const [outboundPhase, setOutboundPhase] = useState<"idle" | "awaiting-approval" | "transferring" | "done">("idle");
+  const currentOutboundBatchIdRef = useRef<string | null>(null);
+  const cancelTransferRef = useRef<boolean>(false);
+
+  // Inbound state
+  const [pendingApproval, setPendingApproval] = useState<PendingInboundApproval | null>(null);
+  const [activeReceiving, setActiveReceiving] = useState<ActiveReceivingItem | null>(null);
+  const activeReceivingRef = useRef<ActiveReceivingItem | null>(null);
+  useEffect(() => {
+    activeReceivingRef.current = activeReceiving;
+  }, [activeReceiving]);
+
+  const [receivedFiles, setReceivedFiles] = useState<ReceivedFileItem[]>([]);
+
+  // In-memory active sinks for incoming files
+  const activeSinksRef = useRef<
+    Map<
+      string,
+      {
+        streamer: OpfsFileStreamer;
+        meta: { id: string; name: string; size: number; mimeType: string };
+      }
+    >
+  >(new Map());
+  const pendingChunksRef = useRef<Map<string, ArrayBuffer[]>>(new Map());
+
+  // Ephemeral Live Chat (In-memory ONLY)
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [unreadCount, setUnreadCount] = useState<number>(0);
+  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const lastChatSendTimeRef = useRef<number[]>([]);
+
+  // WebRTC references
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcControlRef = useRef<RTCDataChannel | null>(null);
+  const dcFileOutRef = useRef<RTCDataChannel | null>(null);
+  const dcFileInRef = useRef<RTCDataChannel | null>(null);
+
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSignalSeqRef = useRef<number>(0);
+  const isConnectingRef = useRef<boolean>(false);
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const hasAnsweredRef = useRef<boolean>(false);
+
+  const { toasts, push, dismiss } = useToasts();
+
+  const pushToast = useCallback(
+    (msg: string, type: "default" | "success" | "error" = "default") => {
+      push(msg, type);
+    },
+    [push],
+  );
+
+  // -------------------------------------------------------------
+  // Data Channel Handlers
+  // -------------------------------------------------------------
+  const handleControlMessage = useCallback(
+    async (rawData: string) => {
+      try {
+        const msg = JSON.parse(rawData) as WebRTCMessage;
+
+        if (msg.type === "chat") {
+          const chatMsg: ChatMessage = {
+            id: msg.id,
+            sender: "peer",
+            senderName: msg.senderName || "Peer",
+            text: msg.text.slice(0, 2000),
+            timestamp: msg.sentAt || Date.now(),
+          };
+          setMessages((prev) => [...prev, chatMsg]);
+          setIsChatOpen((open) => {
+            if (!open) {
+              setUnreadCount((c) => c + 1);
+            }
+            return open;
+          });
+        } else if (msg.type === "transfer-request") {
+          setPendingApproval({
+            batchId: msg.batchId || `batch_${Date.now()}`,
+            files: msg.files,
+          });
+          pushToast(`Peer requested to transfer ${msg.files.length} file(s)`, "default");
+        } else if (msg.type === "transfer-accept") {
+          if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
+            console.warn(`Ignoring transfer-accept for mismatched batch ${msg.batchId}`);
+            return;
+          }
+          pushToast("Peer approved transfer! Commencing P2P stream...", "success");
+          setOutboundPhase("transferring");
+        } else if (msg.type === "transfer-decline") {
+          if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
+            console.warn(`Ignoring transfer-decline for mismatched batch ${msg.batchId}`);
+            return;
+          }
+          pushToast(msg.reason ? `Transfer declined: ${msg.reason}` : "Peer declined the transfer request", "error");
+          setOutboundPhase("idle");
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.status === "requesting" ? { ...f, status: "idle" } : f)),
+          );
+          currentOutboundBatchIdRef.current = null;
+        } else if (msg.type === "file-start") {
+          const startOffset = msg.offset ?? 0;
+          try {
+            const streamer = await createIncomingFileSink(
+              code || "default",
+              msg.id,
+              msg.name,
+              msg.mimeType,
+              msg.size,
+              startOffset,
+            );
+            activeSinksRef.current.set(msg.id, {
+              streamer,
+              meta: { id: msg.id, name: msg.name, size: msg.size, mimeType: msg.mimeType },
+            });
+
+            // Drain any chunks that arrived early
+            const early = pendingChunksRef.current.get(msg.id);
+            if (early && early.length > 0) {
+              for (const c of early) {
+                await streamer.write(c);
+              }
+              pendingChunksRef.current.delete(msg.id);
+            }
+
+            setActiveReceiving({
+              id: msg.id,
+              name: msg.name,
+              size: msg.size,
+              receivedBytes: streamer.getBytesWritten(),
+              batchId: msg.batchId,
+            });
+
+            // Signal peer on control channel that sink is ready
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(JSON.stringify({ type: "file-ready", id: msg.id, batchId: msg.batchId }));
+            }
+          } catch (sinkErr) {
+            console.error("Sink allocation error:", sinkErr);
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-error",
+                  id: msg.id,
+                  error: (sinkErr as Error).message,
+                  batchId: msg.batchId,
+                }),
+              );
+            }
+            pushToast(`Storage error for ${msg.name}: ${(sinkErr as Error).message}`, "error");
+          }
+        } else if (msg.type === "file-end") {
+          const active = activeSinksRef.current.get(msg.id);
+          if (active) {
+            try {
+              const file = await active.streamer.close();
+              const downloadUrl = URL.createObjectURL(file);
+              const completedItem: ReceivedFileItem = {
+                id: active.meta.id,
+                name: active.meta.name,
+                size: file.size,
+                downloadUrl,
+                blob: file,
+                receivedAt: Date.now(),
+              };
+
+              setReceivedFiles((prev) => {
+                const existing = prev.filter((f) => f.id !== active.meta.id);
+                return [...existing, completedItem];
+              });
+
+              activeSinksRef.current.delete(msg.id);
+              setActiveReceiving(null);
+
+              const ctrl = dcControlRef.current;
+              if (ctrl && ctrl.readyState === "open") {
+                ctrl.send(JSON.stringify({ type: "file-ack", id: msg.id, batchId: msg.batchId }));
+              }
+              pushToast(`Received: ${active.meta.name} (Verified & Persisted)`, "success");
+            } catch (closeErr) {
+              console.error("File finalization error:", closeErr);
+              const ctrl = dcControlRef.current;
+              if (ctrl && ctrl.readyState === "open") {
+                ctrl.send(
+                  JSON.stringify({
+                    type: "file-error",
+                    id: msg.id,
+                    error: (closeErr as Error).message,
+                    batchId: msg.batchId,
+                  }),
+                );
+              }
+              pushToast(`Verification failed for ${active.meta.name}: ${(closeErr as Error).message}`, "error");
+              activeSinksRef.current.delete(msg.id);
+              setActiveReceiving(null);
+            }
+          }
+        } else if (msg.type === "transfer-complete") {
+          setActiveReceiving(null);
+          setPendingApproval(null);
+          pushToast("All incoming files transferred successfully!", "success");
+        }
+      } catch (err) {
+        console.error("Error processing control message:", err);
+      }
+    },
+    [code, pushToast],
+  );
+
+  const handleBinaryChunk = useCallback(async (data: ArrayBuffer | Blob) => {
+    let rawBuffer: ArrayBuffer;
+    if (data instanceof ArrayBuffer) {
+      rawBuffer = data;
+    } else {
+      rawBuffer = await (data as Blob).arrayBuffer();
+    }
+
+    const frame = decodeBinaryFrame(rawBuffer);
+    let targetFileId: string | null = null;
+    let payload: ArrayBuffer = rawBuffer;
+
+    if (frame) {
+      targetFileId = frame.fileId;
+      payload = frame.payload;
+    } else {
+      // Fallback: if unframed raw binary, route to currently active sink
+      if (activeReceivingRef.current) {
+        targetFileId = activeReceivingRef.current.id;
+      }
+    }
+
+    if (targetFileId) {
+      const active = activeSinksRef.current.get(targetFileId);
+      if (active) {
+        await active.streamer.write(payload);
+        setActiveReceiving((prev) =>
+          prev && prev.id === targetFileId ? { ...prev, receivedBytes: active.streamer.getBytesWritten() } : prev,
+        );
+      } else {
+        const buffered = pendingChunksRef.current.get(targetFileId) || [];
+        buffered.push(payload);
+        pendingChunksRef.current.set(targetFileId, buffered);
+      }
+    }
+  }, []);
+
+  const attachDataChannelListeners = useCallback(
+    (channel: RTCDataChannel, label: string) => {
+      channel.binaryType = "arraybuffer";
+      channel.bufferedAmountLowThreshold = 64 * 1024;
+
+      channel.onopen = () => {
+        if (connectTimeoutRef.current) {
+          clearTimeout(connectTimeoutRef.current);
+          connectTimeoutRef.current = null;
+        }
+        setConnStatus("connected");
+        setNatWarning(null);
+        setError(null);
+        pushToast("Direct P2P bridge established with Peer", "success");
+      };
+
+      channel.onclose = () => {
+        if (label === DATA_CHANNEL_LABELS.CONTROL || label === DATA_CHANNEL_LABELS.LEGACY_FILE_TRANSFER) {
+          setConnStatus((prev) => (prev === "connected" ? "awaiting" : prev));
+          pushToast("Peer connection detached (Files remain accessible)", "default");
+        }
+      };
+
+      channel.onerror = (err) => {
+        console.error(`DataChannel [${label}] error:`, err);
+      };
+
+      channel.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          handleControlMessage(event.data);
+        } else {
+          handleBinaryChunk(event.data);
+        }
+      };
+    },
+    [handleControlMessage, handleBinaryChunk, pushToast],
+  );
+
+  // -------------------------------------------------------------
+  // Clean Disconnect & Teardown
+  // -------------------------------------------------------------
+  const disconnectSession = useCallback(() => {
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (tickIntervalRef.current) {
+      clearInterval(tickIntervalRef.current);
+      tickIntervalRef.current = null;
+    }
+
+    if (dcControlRef.current) {
+      dcControlRef.current.close();
+      dcControlRef.current = null;
+    }
+    if (dcFileOutRef.current) {
+      dcFileOutRef.current.close();
+      dcFileOutRef.current = null;
+    }
+    if (dcFileInRef.current) {
+      dcFileInRef.current.close();
+      dcFileInRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    activeSinksRef.current.clear();
+    pendingChunksRef.current.clear();
+    pendingCandidatesRef.current = [];
+    cancelTransferRef.current = false;
+    currentOutboundBatchIdRef.current = null;
+    isConnectingRef.current = false;
+    hasAnsweredRef.current = false;
+
+    // Ephemeral chat wiped strictly from memory on disconnect
+    setMessages([]);
+    setUnreadCount(0);
+    setIsChatOpen(false);
+
+    setConnStatus("disconnected");
+    setRole(null);
+    setCode(null);
+    setSessionToken(null);
+    setOutboundPhase("idle");
+    setStagedFiles([]);
+    setPendingApproval(null);
+    setActiveReceiving(null);
+  }, []);
+
+  // -------------------------------------------------------------
+  // Session Creation (Creator / Host Flow)
+  // -------------------------------------------------------------
+  const startHostSession = useCallback(
+    async (selectedTtl = DEFAULT_TTL_SECONDS): Promise<string | null> => {
+      disconnectSession();
+      setError(null);
+      setNatWarning(null);
+      setConnStatus("idle");
+      lastSignalSeqRef.current = 0;
+
+      try {
+        const res = await fetch("/api/signal/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ttlSeconds: selectedTtl }),
+        });
+
+        if (!res.ok) {
+          const errData = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(errData.error || "Could not start receiving session");
+        }
+
+        const data = (await res.json()) as { code: string; expiresAt: number; receiverToken?: string };
+        const currentCode = data.code;
+        const currentToken = data.receiverToken || null;
+
+        setCode(currentCode);
+        setSessionToken(currentToken);
+        setRole("creator");
+        const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
+        setRemainingTtl(rem);
+        setInitialTtl(rem || selectedTtl);
+        setConnStatus("awaiting");
+
+        const pc = createPeerConnection();
+        pcRef.current = pc;
+
+        // Debounced candidate dispatch
+        let candDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+        const outgoingCandidates: RTCIceCandidateInit[] = [];
+
+        const flushCandidates = () => {
+          if (outgoingCandidates.length > 0) {
+            const batch = [...outgoingCandidates];
+            outgoingCandidates.length = 0;
+            sendSignalMessage(currentCode, "receiver", "sender", "candidate-batch", batch, currentToken || undefined);
+          }
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            outgoingCandidates.push(event.candidate.toJSON());
+            if (candDebounceTimer) clearTimeout(candDebounceTimer);
+            candDebounceTimer = setTimeout(flushCandidates, 200);
+          } else {
+            if (candDebounceTimer) clearTimeout(candDebounceTimer);
+            flushCandidates();
+          }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+            setConnStatus("connected");
+            setNatWarning(null);
+          } else if (pc.iceConnectionState === "disconnected") {
+            setConnStatus("reconnecting");
+            triggerIceRestart(pc, currentCode, "receiver", "sender", currentToken || undefined);
+          } else if (pc.iceConnectionState === "failed") {
+            setConnStatus("failed");
+            setNatWarning(
+              "Direct P2P UDP tunnel could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
+            );
+          }
+        };
+
+        // Incoming data channels created by joining peer
+        pc.ondatachannel = (event) => {
+          const ch = event.channel;
+          if (ch.label === DATA_CHANNEL_LABELS.CONTROL) {
+            dcControlRef.current = ch;
+            attachDataChannelListeners(ch, DATA_CHANNEL_LABELS.CONTROL);
+          } else if (ch.label === DATA_CHANNEL_LABELS.FILES_JOINER_TO_CREATOR) {
+            dcFileInRef.current = ch;
+            attachDataChannelListeners(ch, DATA_CHANNEL_LABELS.FILES_JOINER_TO_CREATOR);
+          } else if (ch.label === DATA_CHANNEL_LABELS.FILES_CREATOR_TO_JOINER) {
+            dcFileOutRef.current = ch;
+            attachDataChannelListeners(ch, DATA_CHANNEL_LABELS.FILES_CREATOR_TO_JOINER);
+          } else {
+            // Unified / fallback channel
+            dcControlRef.current = ch;
+            dcFileOutRef.current = ch;
+            dcFileInRef.current = ch;
+            attachDataChannelListeners(ch, ch.label);
+          }
+        };
+
+        // Start countdown ticker
+        tickIntervalRef.current = setInterval(() => {
+          setRemainingTtl((prev) => {
+            if (prev === null || prev <= 1) {
+              disconnectSession();
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+
+        // Start polling signaling server for offers and candidates
+        pollIntervalRef.current = setInterval(async () => {
+          try {
+            const pollRes = await fetchSignalMessages(
+              currentCode,
+              "receiver",
+              lastSignalSeqRef.current,
+              currentToken || undefined,
+            );
+
+            if (pollRes.cursor > lastSignalSeqRef.current) {
+              lastSignalSeqRef.current = pollRes.cursor;
+            }
+
+            for (const item of pollRes.messages) {
+              if (item.type === "offer" && !hasAnsweredRef.current) {
+                hasAnsweredRef.current = true;
+                setConnStatus("connecting");
+                const offer = item.data as RTCSessionDescriptionInit;
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+                for (const cand of pendingCandidatesRef.current) {
+                  await pc.addIceCandidate(new RTCIceCandidate(cand));
+                }
+                pendingCandidatesRef.current = [];
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                await waitForIceGathering(pc, 2200);
+
+                const finalAnswer = pc.localDescription
+                  ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+                  : { type: answer.type, sdp: answer.sdp };
+
+                await sendSignalMessage(
+                  currentCode,
+                  "receiver",
+                  "sender",
+                  "answer",
+                  finalAnswer,
+                  currentToken || undefined,
+                );
+              } else if (item.type === "candidate-batch") {
+                const batch = item.data as RTCIceCandidateInit[];
+                for (const cand of batch) {
+                  if (pc.remoteDescription) {
+                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+                  } else {
+                    pendingCandidatesRef.current.push(cand);
+                  }
+                }
+              }
+            }
+          } catch (pollErr) {
+            console.warn("Receiver signaling poll warning:", pollErr);
+          }
+        }, 600);
+
+        return currentCode;
+      } catch (err) {
+        const msg = (err as Error).message || "Could not start hosting session";
+        setError(msg);
+        setConnStatus("failed");
+        pushToast(msg, "error");
+        return null;
+      }
+    },
+    [disconnectSession, attachDataChannelListeners, pushToast],
+  );
+
+  // -------------------------------------------------------------
+  // Session Join (Guest / Joiner Flow)
+  // -------------------------------------------------------------
+  const joinGuestSession = useCallback(
+    async (codeToJoin: string): Promise<boolean> => {
+      if (isConnectingRef.current) return false;
+      isConnectingRef.current = true;
+      disconnectSession();
+      setError(null);
+      setNatWarning(null);
+      isConnectingRef.current = true;
+
+      try {
+        // 1. Verify session exists
+        let sessionFound = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const checkRes = await fetch(`/api/signal/session/${codeToJoin}`, {
+            cache: "no-store",
+            headers: { "Cache-Control": "no-cache" },
+          });
+          if (checkRes.ok) {
+            sessionFound = true;
+            break;
+          }
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+        }
+
+        if (!sessionFound) {
+          setError("That 8-digit code is invalid, non-existent, or expired.");
+          isConnectingRef.current = false;
+          return false;
+        }
+
+        // 2. Join session and obtain authorized sender token
+        const joinRes = await fetch(`/api/signal/session/${codeToJoin}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+
+        if (!joinRes.ok) {
+          const joinErr = (await joinRes.json().catch(() => ({}))) as { error?: string };
+          setError(joinErr.error || "Could not join pairing session. Please try again.");
+          isConnectingRef.current = false;
+          return false;
+        }
+
+        const joinData = (await joinRes.json()) as { ok: boolean; senderToken?: string };
+        const currentToken = joinData.senderToken || null;
+
+        setCode(codeToJoin);
+        setSessionToken(currentToken);
+        setRole("joiner");
+        setConnStatus("connecting");
+        lastSignalSeqRef.current = 0;
+
+        // 3. Create PeerConnection & Separate Data Channels
+        const pc = createPeerConnection();
+        pcRef.current = pc;
+
+        // A. Control channel (ordered, reliable: JSON signals & live chat)
+        const ctrl = pc.createDataChannel(DATA_CHANNEL_LABELS.CONTROL, { ordered: true });
+        dcControlRef.current = ctrl;
+        attachDataChannelListeners(ctrl, DATA_CHANNEL_LABELS.CONTROL);
+
+        // B. Outbound file channel (Joiner -> Creator)
+        const fileOut = pc.createDataChannel(DATA_CHANNEL_LABELS.FILES_JOINER_TO_CREATOR, { ordered: true });
+        dcFileOutRef.current = fileOut;
+        attachDataChannelListeners(fileOut, DATA_CHANNEL_LABELS.FILES_JOINER_TO_CREATOR);
+
+        // C. Inbound file channel (Creator -> Joiner)
+        const fileIn = pc.createDataChannel(DATA_CHANNEL_LABELS.FILES_CREATOR_TO_JOINER, { ordered: true });
+        dcFileInRef.current = fileIn;
+        attachDataChannelListeners(fileIn, DATA_CHANNEL_LABELS.FILES_CREATOR_TO_JOINER);
+
+        // Debounced candidate dispatch
+        let candDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+        const outgoingCandidates: RTCIceCandidateInit[] = [];
+
+        const flushCandidates = () => {
+          if (outgoingCandidates.length > 0) {
+            const batch = [...outgoingCandidates];
+            outgoingCandidates.length = 0;
+            sendSignalMessage(codeToJoin, "sender", "receiver", "candidate-batch", batch, currentToken || undefined);
+          }
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            outgoingCandidates.push(event.candidate.toJSON());
+            if (candDebounceTimer) clearTimeout(candDebounceTimer);
+            candDebounceTimer = setTimeout(flushCandidates, 200);
+          } else {
+            if (candDebounceTimer) clearTimeout(candDebounceTimer);
+            flushCandidates();
+          }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+            setConnStatus("connected");
+            setNatWarning(null);
+          } else if (pc.iceConnectionState === "disconnected") {
+            setConnStatus("reconnecting");
+            triggerIceRestart(pc, codeToJoin, "sender", "receiver", currentToken || undefined);
+          } else if (pc.iceConnectionState === "failed") {
+            setConnStatus("disconnected");
+            setNatWarning(
+              "Direct P2P UDP connection could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
+            );
+          }
+        };
+
+        // 4. Create and send offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGathering(pc, 2200);
+
+        const finalOffer = pc.localDescription
+          ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+          : { type: offer.type, sdp: offer.sdp };
+
+        const sent = await sendSignalMessage(
+          codeToJoin,
+          "sender",
+          "receiver",
+          "offer",
+          finalOffer,
+          currentToken || undefined,
+        );
+        if (!sent) {
+          throw new Error("Could not deliver WebRTC offer. Please confirm receiver code is active.");
+        }
+
+        // Safety timeout
+        connectTimeoutRef.current = setTimeout(() => {
+          if (dcControlRef.current?.readyState !== "open") {
+            setError("Connection timed out. Please ensure the other device is open on the 'Receive Files' or 'Dual Mode' screen.");
+            disconnectSession();
+          }
+        }, 35000);
+
+        // Polling loop
+        pollIntervalRef.current = setInterval(async () => {
+          try {
+            const pollRes = await fetchSignalMessages(
+              codeToJoin,
+              "sender",
+              lastSignalSeqRef.current,
+              currentToken || undefined,
+            );
+
+            if (pollRes.cursor > lastSignalSeqRef.current) {
+              lastSignalSeqRef.current = pollRes.cursor;
+            }
+
+            for (const item of pollRes.messages) {
+              if (item.type === "answer") {
+                const answer = item.data as RTCSessionDescriptionInit;
+                if (!pc.remoteDescription) {
+                  await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                  for (const cand of pendingCandidatesRef.current) {
+                    await pc.addIceCandidate(new RTCIceCandidate(cand));
+                  }
+                  pendingCandidatesRef.current = [];
+                }
+              } else if (item.type === "candidate-batch") {
+                const batch = item.data as RTCIceCandidateInit[];
+                for (const cand of batch) {
+                  if (pc.remoteDescription) {
+                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+                  } else {
+                    pendingCandidatesRef.current.push(cand);
+                  }
+                }
+              }
+            }
+          } catch (pollErr) {
+            console.warn("Sender signaling poll error:", pollErr);
+          }
+        }, 600);
+
+        isConnectingRef.current = false;
+        return true;
+      } catch (err) {
+        const msg = (err as Error).message || "Could not join session";
+        setError(msg);
+        setConnStatus("failed");
+        isConnectingRef.current = false;
+        pushToast(msg, "error");
+        return false;
+      }
+    },
+    [disconnectSession, attachDataChannelListeners, pushToast],
+  );
+
+  // -------------------------------------------------------------
+  // Outbound Transfer Actions (Sending)
+  // -------------------------------------------------------------
+  const handleFiles = useCallback(
+    (fileList: FileList | File[]) => {
+      const incoming = Array.from(fileList);
+      const newItems: StagedItem[] = [];
+
+      for (const file of incoming) {
+        const randomSlug = Math.random().toString(36).slice(2, 8);
+        const id = `${Date.now()}-${randomSlug}-${file.name}`;
+        newItems.push({
+          id,
+          file,
+          name: file.name,
+          size: file.size,
+          progress: 0,
+          status: "idle",
+        });
+      }
+
+      if (newItems.length > 0) {
+        setStagedFiles((prev) => [...prev, ...newItems]);
+        setOutboundPhase((prev) => (prev === "done" ? "idle" : prev));
+        pushToast(`Staged ${newItems.length} file${newItems.length > 1 ? "s" : ""}`, "default");
+      }
+    },
+    [pushToast],
+  );
+
+  const removeStagedItem = useCallback((id: string) => {
+    setStagedFiles((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const clearAllStaged = useCallback(() => {
+    setStagedFiles([]);
+  }, []);
+
+  const retryFailedFile = useCallback((id: string) => {
+    setStagedFiles((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, status: "idle", error: undefined, progress: 0 } : f)),
+    );
+  }, []);
+
+  const triggerTransferRequest = useCallback(async () => {
+    const ctrl = dcControlRef.current;
+    if (!ctrl || ctrl.readyState !== "open") {
+      pushToast("Direct P2P tunnel is not open", "error");
+      return;
+    }
+
+    const pendingItems = stagedFilesRef.current.filter((f) => f.status === "idle");
+    if (pendingItems.length === 0) {
+      pushToast("No new files staged for transfer", "default");
+      return;
+    }
+
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    currentOutboundBatchIdRef.current = batchId;
+
+    const pendingIds = new Set(pendingItems.map((f) => f.id));
+    setOutboundPhase("awaiting-approval");
+    setStagedFiles((prev) =>
+      prev.map((f) => (pendingIds.has(f.id) ? { ...f, status: "requesting" } : f)),
+    );
+
+    const manifestFiles = pendingItems.map((f) => ({
+      id: f.id,
+      name: f.name,
+      size: f.size,
+      type: f.file.type || "application/octet-stream",
+    }));
+
+    const reqMsg: WebRTCMessage = {
+      type: "transfer-request",
+      batchId,
+      files: manifestFiles,
+      senderRole: role || undefined,
+    };
+
+    ctrl.send(JSON.stringify(reqMsg));
+    pushToast(`Transfer authorization request sent for ${manifestFiles.length} file(s)...`, "default");
+  }, [role, pushToast]);
+
+  // Outbound file streaming effect
+  useEffect(() => {
+    if (outboundPhase !== "transferring") return;
+
+    let isSubscribed = true;
+
+    async function streamAllFiles() {
+      const ctrl = dcControlRef.current;
+      const fileOut = dcFileOutRef.current || ctrl;
+      if (!ctrl || ctrl.readyState !== "open" || !fileOut || fileOut.readyState !== "open") return;
+
+      cancelTransferRef.current = false;
+      const activeBatchId = currentOutboundBatchIdRef.current;
+      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting");
+
+      for (const item of pending) {
+        if (!isSubscribed || cancelTransferRef.current) break;
+
+        setStagedFiles((prev) =>
+          prev.map((f) => (f.id === item.id ? { ...f, status: "uploading", progress: 0 } : f)),
+        );
+
+        try {
+          await streamFileOverDataChannel(
+            fileOut,
+            item.file,
+            item.id,
+            0,
+            (sent, total) => {
+              if (!isSubscribed) return;
+              const pct = Math.min(99, Math.round((sent / total) * 100));
+              setStagedFiles((prev) =>
+                prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
+              );
+            },
+            () => cancelTransferRef.current,
+            ctrl,
+            activeBatchId ?? undefined,
+          );
+
+          if (!isSubscribed) return;
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.id === item.id ? { ...f, status: "done", progress: 100 } : f)),
+          );
+          pushToast(`${item.name} transferred directly!`, "success");
+        } catch (err) {
+          if (!isSubscribed) return;
+          const msg = (err as Error).message || "Streaming interrupted";
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.id === item.id ? { ...f, status: "error", error: msg } : f)),
+          );
+          pushToast(`Failed to stream ${item.name}: ${msg}`, "error");
+        }
+      }
+
+      if (isSubscribed && !cancelTransferRef.current) {
+        ctrl.send(JSON.stringify({ type: "transfer-complete", batchId: activeBatchId ?? undefined }));
+        const hasRemainingIdle = stagedFilesRef.current.some((f) => f.status === "idle");
+        setOutboundPhase(hasRemainingIdle ? "idle" : "done");
+        currentOutboundBatchIdRef.current = null;
+        pushToast("Batch transferred to peer successfully!", "success");
+      }
+    }
+
+    streamAllFiles();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [outboundPhase, pushToast]);
+
+  // -------------------------------------------------------------
+  // Inbound Transfer Actions (Receiving)
+  // -------------------------------------------------------------
+  const handleAcceptTransfer = useCallback(() => {
+    const ctrl = dcControlRef.current;
+    if (!ctrl || ctrl.readyState !== "open") {
+      pushToast("Connection not ready", "error");
+      return;
+    }
+    const acceptMsg: WebRTCMessage = {
+      type: "transfer-accept",
+      batchId: pendingApproval?.batchId,
+    };
+    ctrl.send(JSON.stringify(acceptMsg));
+    pushToast("Transfer accepted. Streaming directly to local storage...", "success");
+    setPendingApproval(null);
+  }, [pendingApproval, pushToast]);
+
+  const handleDeclineTransfer = useCallback(() => {
+    const ctrl = dcControlRef.current;
+    if (ctrl && ctrl.readyState === "open") {
+      const declineMsg: WebRTCMessage = {
+        type: "transfer-decline",
+        batchId: pendingApproval?.batchId,
+        reason: "Declined by recipient",
+      };
+      ctrl.send(JSON.stringify(declineMsg));
+    }
+    pushToast("Transfer declined", "default");
+    setPendingApproval(null);
+  }, [pendingApproval, pushToast]);
+
+  const downloadSingleFile = useCallback((file: ReceivedFileItem) => {
+    const link = document.createElement("a");
+    link.href = file.downloadUrl;
+    link.download = file.name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, []);
+
+  const downloadAllFiles = useCallback(async () => {
+    if (receivedFiles.length === 0) return;
+    pushToast(`Downloading ${receivedFiles.length} file${receivedFiles.length > 1 ? "s" : ""}...`, "default");
+
+    for (let i = 0; i < receivedFiles.length; i++) {
+      downloadSingleFile(receivedFiles[i]);
+      if (i < receivedFiles.length - 1) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    }
+  }, [receivedFiles, downloadSingleFile, pushToast]);
+
+  // -------------------------------------------------------------
+  // Ephemeral Live Chat Actions
+  // -------------------------------------------------------------
+  const sendMessage = useCallback(
+    (rawText: string): boolean => {
+      const ctrl = dcControlRef.current;
+      if (!ctrl || ctrl.readyState !== "open") {
+        pushToast("Cannot send message: P2P tunnel not open", "error");
+        return false;
+      }
+
+      const text = rawText.trim();
+      if (!text || text.length > 2000) return false;
+
+      // Rate limit: max 5 messages per second
+      const now = Date.now();
+      lastChatSendTimeRef.current = lastChatSendTimeRef.current.filter((t) => now - t < 1000);
+      if (lastChatSendTimeRef.current.length >= 5) {
+        pushToast("Chat rate limit exceeded. Please wait a moment.", "error");
+        return false;
+      }
+      lastChatSendTimeRef.current.push(now);
+
+      const msgId = `msg_${now}_${Math.random().toString(36).slice(2, 7)}`;
+      const localMsg: ChatMessage = {
+        id: msgId,
+        sender: "me",
+        senderName: "You",
+        text,
+        timestamp: now,
+      };
+
+      // In-memory ONLY
+      setMessages((prev) => [...prev, localMsg]);
+
+      const wireMsg: WebRTCMessage = {
+        type: "chat",
+        id: msgId,
+        text,
+        sentAt: now,
+        senderRole: role || undefined,
+        senderName: "Peer",
+      };
+
+      ctrl.send(JSON.stringify(wireMsg));
+      return true;
+    },
+    [role, pushToast],
+  );
+
+  const toggleChat = useCallback(() => {
+    setIsChatOpen((prev) => {
+      const next = !prev;
+      if (next) setUnreadCount(0);
+      return next;
+    });
+  }, []);
+
+  const markChatRead = useCallback(() => {
+    setUnreadCount(0);
+  }, []);
+
+  // -------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------
+  const copyLink = useCallback(() => {
+    if (!code) return;
+    const url = `${window.location.origin}/?mode=send&code=${code}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    pushToast("Direct pairing link copied to clipboard", "default");
+    setTimeout(() => setCopiedLink(false), 2000);
+  }, [code, pushToast]);
+
+  const shareLink = useCallback(async () => {
+    if (!code) return;
+    const url = `${window.location.origin}/?mode=send&code=${code}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "GhostShare File Transfer",
+          text: `Connect to GhostShare WebRTC session with code ${code}`,
+          url,
+        });
+      } catch {}
+    } else {
+      copyLink();
+    }
+  }, [code, copyLink]);
+
+  const updateExpiryWindow = useCallback(
+    async (newTtlSeconds: number) => {
+      if (!code || !sessionToken) return;
+      try {
+        const res = await fetch(`/api/signal/session/${code}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({ ttlSeconds: newTtlSeconds }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { expiresAt: number };
+          const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
+          setRemainingTtl(rem);
+          setInitialTtl(rem || newTtlSeconds);
+          pushToast(`Session window adjusted to ${Math.round(newTtlSeconds / 60)} minutes`, "default");
+        }
+      } catch (err) {
+        console.error("Failed to update expiry window:", err);
+      }
+    },
+    [code, sessionToken, pushToast],
+  );
+
+  return (
+    <SessionContext.Provider
+      value={{
+        mode,
+        setMode,
+        role,
+        code,
+        sessionToken,
+        connStatus,
+        error,
+        natWarning,
+        remainingTtl,
+        initialTtl,
+        copiedLink,
+        startHostSession,
+        joinGuestSession,
+        disconnectSession,
+        updateExpiryWindow,
+        copyLink,
+        shareLink,
+        stagedFiles,
+        outboundPhase,
+        handleFiles,
+        removeStagedItem,
+        clearAllStaged,
+        triggerTransferRequest,
+        retryFailedFile,
+        pendingApproval,
+        handleAcceptTransfer,
+        handleDeclineTransfer,
+        activeReceiving,
+        receivedFiles,
+        downloadAllFiles,
+        downloadSingleFile,
+        messages,
+        unreadCount,
+        isChatOpen,
+        toggleChat,
+        setIsChatOpen,
+        sendMessage,
+        markChatRead,
+        pushToast,
+      }}
+    >
+      <ToastStack toasts={toasts} onDismiss={dismiss} />
+      {children}
+    </SessionContext.Provider>
+  );
+}

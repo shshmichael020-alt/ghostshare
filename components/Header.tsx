@@ -3,8 +3,8 @@
 import { Ghost, ShieldCheck } from "lucide-react";
 
 interface HeaderProps {
-  mode: "receive" | "send";
-  onModeChange: (mode: "receive" | "send") => void;
+  mode: "receive" | "send" | "dual";
+  onModeChange: (mode: "receive" | "send" | "dual") => void;
   onOpenSecurity: () => void;
 }
 
@@ -55,6 +55,17 @@ export default function Header({ mode, onModeChange, onOpenSecurity }: HeaderPro
             }`}
           >
             Send <span className="hidden sm:inline">Files</span>
+          </button>
+          <button
+            onClick={() => onModeChange("dual")}
+            aria-current={mode === "dual" ? "page" : undefined}
+            className={`px-3 sm:px-4 py-1.5 rounded-lg font-body-sm transition-all duration-200 cursor-pointer ${
+              mode === "dual"
+                ? "bg-surface-container-highest text-on-surface font-medium shadow-sm border border-white/[0.06]"
+                : "text-on-surface-variant hover:text-on-surface"
+            }`}
+          >
+            Dual <span className="hidden sm:inline">Mode</span>
           </button>
         </nav>
 

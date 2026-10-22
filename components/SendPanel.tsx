@@ -1,21 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback } from "react";
 import { formatSize } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinInput from "./PinInput";
 import QrScannerModal from "./QrScannerModal";
-import ToastStack from "./ToastStack";
-import { useToasts } from "@/lib/useToasts";
-import {
-  createPeerConnection,
-  sendSignalMessage,
-  fetchSignalMessages,
-  waitForIceGathering,
-  streamFileOverDataChannel,
-  triggerIceRestart,
-  WebRTCMessage,
-} from "@/lib/webrtc";
+import { useGhostSession } from "@/context/SessionContext";
 import {
   QrCode,
   X,
@@ -32,524 +22,60 @@ import {
   Trash2,
   Radio,
   AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 
-export type StagedItem = {
-  id: string;
-  file: File;
-  name: string;
-  size: number;
-  progress: number;
-  status: "idle" | "requesting" | "uploading" | "done" | "error";
-  error?: string;
-};
-
 export default function SendPanel({ initialCode }: { initialCode?: string }) {
-  const [codeInput, setCodeInput] = useState(initialCode ?? "");
-  const [linkedCode, setLinkedCode] = useState<string | null>(null);
+  const {
+    code: activeSessionCode,
+    connStatus,
+    error: sessionError,
+    natWarning: sessionNatWarning,
+    joinGuestSession,
+    disconnectSession,
+    stagedFiles,
+    outboundPhase,
+    handleFiles,
+    removeStagedItem,
+    clearAllStaged,
+    triggerTransferRequest,
+    retryFailedFile,
+  } = useGhostSession();
+
+  const [codeInput, setCodeInput] = useState(initialCode ?? activeSessionCode ?? "");
   const [checking, setChecking] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
-  const [natWarning, setNatWarning] = useState<string | null>(null);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
-
-  // WebRTC Connection State
-  const [connStatus, setConnStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
-  const [transferPhase, setTransferPhase] = useState<"idle" | "awaiting-approval" | "transferring" | "done">("idle");
-
-  const [stagedFiles, setStagedFiles] = useState<StagedItem[]>([]);
-  const stagedFilesRef = useRef(stagedFiles);
-  useEffect(() => {
-    stagedFilesRef.current = stagedFiles;
-  }, [stagedFiles]);
-
   const [dragOver, setDragOver] = useState(false);
-
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSignalSeq = useRef<number>(0);
-  const senderTokenRef = useRef<string | null>(null);
-  const cancelTransferRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
-  const isConnectingRef = useRef(false);
-  const currentBatchIdRef = useRef<string | null>(null);
 
-  const { toasts, push, dismiss } = useToasts();
+  const connectToReceiver = useCallback(
+    async (codeToConnect: string) => {
+      if (checking || codeToConnect.length !== 8) return;
+      setChecking(true);
+      setCodeError(null);
 
-  // Reset and disconnect WebRTC & signaling
-  const disconnectSession = useCallback(() => {
-    if (connectTimeoutRef.current) {
-      clearTimeout(connectTimeoutRef.current);
-      connectTimeoutRef.current = null;
-    }
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (dcRef.current) {
-      dcRef.current.close();
-      dcRef.current = null;
-    }
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
-    setConnStatus("disconnected");
-    setTransferPhase("idle");
-    setLinkedCode(null);
-    setStagedFiles([]);
-    pendingCandidatesRef.current = [];
-    cancelTransferRef.current = false;
-    isConnectingRef.current = false;
-    currentBatchIdRef.current = null;
-  }, []);
-
-  // Set up WebRTC connection to receiver with pairing code
-  const connectToReceiver = useCallback(async (codeToConnect: string) => {
-    if (isConnectingRef.current) return false;
-    isConnectingRef.current = true;
-    setChecking(true);
-    setCodeError(null);
-    setNatWarning(null);
-    disconnectSession();
-    isConnectingRef.current = true;
-
-    try {
-      // 1. Verify session exists (retries up to 3 times to absorb edge KV propagation latency)
-      let sessionFound = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const checkRes = await fetch(`/api/signal/session/${codeToConnect}`, {
-          cache: "no-store",
-          headers: { "Cache-Control": "no-cache" },
-        });
-        if (checkRes.ok) {
-          sessionFound = true;
-          break;
-        }
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 800));
-        }
-      }
-
-      if (!sessionFound) {
-        setCodeError("That 8-digit code is invalid, non-existent, or expired.");
-        setChecking(false);
-        isConnectingRef.current = false;
-        return false;
-      }
-
-      // 2. Join session and obtain authorized sender capability token
-      const joinRes = await fetch(`/api/signal/session/${codeToConnect}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ senderToken: senderTokenRef.current }),
-      });
-      if (!joinRes.ok) {
-        const joinErr = (await joinRes.json().catch(() => ({}))) as { error?: string };
-        setCodeError(joinErr.error || "Could not join pairing session. Please try again.");
-        setChecking(false);
-        isConnectingRef.current = false;
-        return false;
-      }
-      const joinData = (await joinRes.json()) as { ok: boolean; senderToken?: string };
-      if (joinData.senderToken) {
-        senderTokenRef.current = joinData.senderToken;
-      }
-
-      setLinkedCode(codeToConnect);
-      setConnStatus("connecting");
-      lastSignalSeq.current = 0;
-
-      // 3. Create WebRTC Peer Connection
-      const pc = createPeerConnection();
-      pcRef.current = pc;
-
-      // Batch ICE candidates with 200ms debounce to prevent mobile network flooding & KV collisions
-      let candDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-      const outgoingCandidates: RTCIceCandidateInit[] = [];
-
-      const flushCandidates = () => {
-        if (outgoingCandidates.length > 0) {
-          const batch = [...outgoingCandidates];
-          outgoingCandidates.length = 0;
-          sendSignalMessage(
-            codeToConnect,
-            "sender",
-            "receiver",
-            "candidate-batch",
-            batch,
-            senderTokenRef.current || undefined,
-          );
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          outgoingCandidates.push(event.candidate.toJSON());
-          if (candDebounceTimer) clearTimeout(candDebounceTimer);
-          candDebounceTimer = setTimeout(flushCandidates, 200);
-        } else {
-          if (candDebounceTimer) clearTimeout(candDebounceTimer);
-          flushCandidates();
-        }
-      };
-
-      // Handle ICE connection state changes with Auto-Reconnect
-      pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-          setConnStatus("connected");
-          setNatWarning(null);
-        } else if (pc.iceConnectionState === "disconnected") {
-          setConnStatus("connecting");
-          // Silently trigger ICE restart to auto-reconnect without resetting
-          triggerIceRestart(pc, codeToConnect, "sender", "receiver", senderTokenRef.current || undefined);
-        } else if (pc.iceConnectionState === "failed") {
-          setConnStatus("disconnected");
-          setChecking(false);
-          if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-          setNatWarning(
-            "Direct P2P UDP connection could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
-          );
-        }
-      };
-
-      // 4. Create Data Channel (sender initiates)
-      const dc = pc.createDataChannel("file-transfer", { ordered: true });
-      dcRef.current = dc;
-      dc.binaryType = "arraybuffer";
-      dc.bufferedAmountLowThreshold = 64 * 1024;
-
-      dc.onopen = () => {
-        if (connectTimeoutRef.current) {
-          clearTimeout(connectTimeoutRef.current);
-          connectTimeoutRef.current = null;
-        }
-        setConnStatus("connected");
-        setChecking(false);
-        push("Direct P2P tunnel established with Recipient", "success");
-      };
-
-      dc.onclose = () => {
-        setConnStatus("disconnected");
-        push("Recipient disconnected", "default");
-      };
-
-      dc.onerror = (err) => {
-        console.error("Data channel error:", err);
-      };
-
-      // Listen for control messages from receiver
-      dc.onmessage = (event) => {
-        if (typeof event.data === "string") {
-          try {
-            const msg = JSON.parse(event.data) as WebRTCMessage;
-            if (msg.type === "transfer-accept") {
-              if (msg.batchId && currentBatchIdRef.current && msg.batchId !== currentBatchIdRef.current) {
-                console.warn(`Ignoring transfer-accept for mismatched batch ${msg.batchId}`);
-                return;
-              }
-              push("Recipient approved transfer! Commencing P2P stream...", "success");
-              // Proceed with file streaming
-              setTransferPhase("transferring");
-            } else if (msg.type === "transfer-decline") {
-              if (msg.batchId && currentBatchIdRef.current && msg.batchId !== currentBatchIdRef.current) {
-                console.warn(`Ignoring transfer-decline for mismatched batch ${msg.batchId}`);
-                return;
-              }
-              push(msg.reason ? `Transfer declined: ${msg.reason}` : "Recipient declined the transfer request", "error");
-              setTransferPhase("idle");
-              setStagedFiles((prev) =>
-                prev.map((f) => (f.status === "requesting" ? { ...f, status: "idle" } : f)),
-              );
-              currentBatchIdRef.current = null;
-            }
-          } catch (e) {
-            console.error("Failed to parse incoming control message:", e);
-          }
-        }
-      };
-
-      // 5. Create & gather SDP offer with initial candidates (2200ms or resolves on completion)
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await waitForIceGathering(pc, 2200);
-
-      const finalOffer = pc.localDescription
-        ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
-        : { type: offer.type, sdp: offer.sdp };
-      const sent = await sendSignalMessage(
-        codeToConnect,
-        "sender",
-        "receiver",
-        "offer",
-        finalOffer,
-        senderTokenRef.current || undefined,
-      );
-      if (!sent) {
-        throw new Error("Could not deliver WebRTC offer. Please confirm receiver code is active.");
-      }
-
-      // 6. Safety timeout: cancel if handshake does not complete within 35 seconds (generous for cellular networks)
-      connectTimeoutRef.current = setTimeout(() => {
-        if (dcRef.current?.readyState !== "open") {
-          setChecking(false);
-          isConnectingRef.current = false;
-          setCodeError("Connection timed out. Please ensure the other device is open on the 'Receive Files' screen with this code.");
-          disconnectSession();
-        }
-      }, 35000);
-
-      // 7. Start signaling poll loop with monotonic sequence cursor (responsive 600ms polling)
-      pollRef.current = setInterval(async () => {
-        try {
-          const pollRes = await fetchSignalMessages(
-            codeToConnect,
-            "sender",
-            lastSignalSeq.current,
-            senderTokenRef.current || undefined,
-          );
-
-          if (pollRes.cursor > lastSignalSeq.current) {
-            lastSignalSeq.current = pollRes.cursor;
-          }
-
-          for (const msg of pollRes.messages) {
-
-            if (msg.type === "answer") {
-              if (pc.signalingState === "have-local-offer") {
-                const answerDesc = msg.data as RTCSessionDescriptionInit;
-                await pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
-
-                // Drain any queued ICE candidates that arrived before the answer
-                if (pendingCandidatesRef.current.length > 0) {
-                  for (const cand of pendingCandidatesRef.current) {
-                    try {
-                      await pc.addIceCandidate(new RTCIceCandidate(cand));
-                    } catch (drainErr) {
-                      console.warn("Drain ICE candidate error:", drainErr);
-                    }
-                  }
-                  pendingCandidatesRef.current = [];
-                }
-              }
-            } else if (msg.type === "candidate-batch" || msg.type === "candidate") {
-              const cands: RTCIceCandidateInit[] =
-                msg.type === "candidate-batch" && Array.isArray(msg.data)
-                  ? (msg.data as RTCIceCandidateInit[])
-                  : [msg.data as RTCIceCandidateInit];
-
-              for (const candidate of cands) {
-                if (pc.remoteDescription) {
-                  try {
-                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                  } catch (iceErr) {
-                    console.warn("Failed to add ICE candidate:", iceErr);
-                  }
-                } else {
-                  pendingCandidatesRef.current.push(candidate);
-                }
-              }
-            } else if (msg.type === "leave") {
-              setConnStatus("disconnected");
-              push("Recipient closed pairing channel", "default");
-            }
-          }
-        } catch {
-          // Transient network error
-        }
-      }, 600);
-
-      return true;
-    } catch (e) {
-      setCodeError((e as Error).message);
+      const success = await joinGuestSession(codeToConnect);
       setChecking(false);
-      isConnectingRef.current = false;
-      return false;
-    }
-  }, [disconnectSession, push]);
-
-  // Check initial code from URL if provided
-  useEffect(() => {
-    if (initialCode && /^\d{8}$/.test(initialCode)) {
-      const timer = setTimeout(() => {
-        connectToReceiver(initialCode);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-  }, [initialCode, connectToReceiver]);
-
-  // Combined transfer size computations
-  const totalStagedBytes = stagedFiles.reduce((sum, f) => sum + f.size, 0);
-
-  const handleFiles = useCallback(
-    (fileList: FileList | File[]) => {
-      const incoming = Array.from(fileList);
-      const newItems: StagedItem[] = [];
-
-      for (const file of incoming) {
-        const randomSlug = Math.random().toString(36).slice(2, 8);
-        const id = `${Date.now()}-${randomSlug}-${file.name}`;
-        newItems.push({
-          id,
-          file,
-          name: file.name,
-          size: file.size,
-          progress: 0,
-          status: "idle",
-        });
-      }
-
-      if (newItems.length > 0) {
-        setStagedFiles((prev) => [...prev, ...newItems]);
-        setTransferPhase((prev) => (prev === "done" ? "idle" : prev));
-        push(`Staged ${newItems.length} file${newItems.length > 1 ? "s" : ""}`, "default");
+      if (!success) {
+        setCodeError(sessionError || "That 8-digit code is invalid, non-existent, or expired.");
       }
     },
-    [push],
+    [checking, joinGuestSession, sessionError],
   );
-
-  // Support paste-to-upload: Ctrl/Cmd+V files or screenshots directly
-  useEffect(() => {
-    if (!linkedCode) return;
-
-    function onPaste(e: ClipboardEvent) {
-      const items = e.clipboardData?.files;
-      if (items && items.length > 0) {
-        handleFiles(items);
-        push(`Pasted ${items.length} file${items.length > 1 ? "s" : ""} from clipboard`, "default");
-      }
-    }
-
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, [linkedCode, handleFiles, push]);
-
-  function removeStagedItem(id: string) {
-    setStagedFiles((prev) => prev.filter((item) => item.id !== id));
-  }
-
-  function clearAllStaged() {
-    setStagedFiles([]);
-  }
-
-  // Request transfer approval from receiver
-  async function triggerTransferRequest() {
-    if (!dcRef.current || dcRef.current.readyState !== "open") {
-      push("Direct P2P tunnel is not open", "error");
-      return;
-    }
-
-    // Only stage files that are 'idle' (not already transferred or in-flight)
-    const pendingItems = stagedFilesRef.current.filter((f) => f.status === "idle");
-    if (pendingItems.length === 0) {
-      push("No new files staged for transfer", "default");
-      return;
-    }
-
-    const batchId = "batch_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
-    currentBatchIdRef.current = batchId;
-
-    const pendingIds = new Set(pendingItems.map((f) => f.id));
-    setTransferPhase("awaiting-approval");
-    setStagedFiles((prev) =>
-      prev.map((f) => (pendingIds.has(f.id) ? { ...f, status: "requesting" } : f)),
-    );
-
-    const manifestFiles = pendingItems.map((f) => ({
-      id: f.id,
-      name: f.name,
-      size: f.size,
-      type: f.file.type || "application/octet-stream",
-    }));
-
-    const reqMsg: WebRTCMessage = {
-      type: "transfer-request",
-      batchId,
-      files: manifestFiles,
-    };
-
-    dcRef.current.send(JSON.stringify(reqMsg));
-    push(`Transfer authorization request sent for ${manifestFiles.length} file(s)...`, "default");
-  }
-
-  // Stream staged files once accepted
-  useEffect(() => {
-    if (transferPhase !== "transferring") return;
-
-    let isSubscribed = true;
-
-    async function streamAllFiles() {
-      if (!dcRef.current || dcRef.current.readyState !== "open") return;
-
-      cancelTransferRef.current = false;
-      const activeBatchId = currentBatchIdRef.current;
-      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting");
-
-      for (const item of pending) {
-        if (!isSubscribed || cancelTransferRef.current) break;
-
-        setStagedFiles((prev) =>
-          prev.map((f) => (f.id === item.id ? { ...f, status: "uploading", progress: 0 } : f)),
-        );
-
-        try {
-          await streamFileOverDataChannel(
-            dcRef.current,
-            item.file,
-            item.id,
-            0,
-            (sent, total) => {
-              if (!isSubscribed) return;
-              const pct = Math.min(99, Math.round((sent / total) * 100));
-              setStagedFiles((prev) =>
-                prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
-              );
-            },
-            () => cancelTransferRef.current,
-          );
-
-          if (!isSubscribed) return;
-          setStagedFiles((prev) =>
-            prev.map((f) => (f.id === item.id ? { ...f, status: "done", progress: 100 } : f)),
-          );
-          push(`${item.name} transferred directly!`, "success");
-        } catch (err) {
-          if (!isSubscribed) return;
-          const msg = (err as Error).message || "Streaming interrupted";
-          setStagedFiles((prev) =>
-            prev.map((f) => (f.id === item.id ? { ...f, status: "error", error: msg } : f)),
-          );
-          push(`Failed to stream ${item.name}: ${msg}`, "error");
-        }
-      }
-
-      if (isSubscribed && !cancelTransferRef.current) {
-        dcRef.current.send(JSON.stringify({ type: "transfer-complete", batchId: activeBatchId ?? undefined }));
-        const hasRemainingIdle = stagedFilesRef.current.some((f) => f.status === "idle");
-        setTransferPhase(hasRemainingIdle ? "idle" : "done");
-        currentBatchIdRef.current = null;
-        push("Batch transferred to recipient successfully!", "success");
-      }
-    }
-
-    streamAllFiles();
-
-    return () => {
-      isSubscribed = false;
-    };
-  }, [transferPhase, push]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */
   /* ------------------------------------------------------------- */
-  if (!linkedCode || connStatus !== "connected") {
+  if (connStatus !== "connected") {
     return (
       <div className="w-full flex flex-col items-center">
-        <ToastStack toasts={toasts} onDismiss={dismiss} />
         <QrScannerModal
           isOpen={isScannerOpen}
           onClose={() => setIsScannerOpen(false)}
           onScanSuccess={(scannedCode) => {
             setCodeInput(scannedCode);
+            setIsScannerOpen(false);
             connectToReceiver(scannedCode);
           }}
         />
@@ -616,17 +142,17 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             disabled={checking}
           />
 
-          {codeError && (
+          {(codeError || sessionError) && (
             <div className="p-3.5 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-start gap-2 text-xs font-body-sm">
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
-              <span>{codeError}</span>
+              <span>{codeError || sessionError}</span>
             </div>
           )}
 
-          {natWarning && (
+          {sessionNatWarning && (
             <div className="p-3.5 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-start gap-2 text-xs font-body-sm">
               <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-              <span>{natWarning}</span>
+              <span>{sessionNatWarning}</span>
             </div>
           )}
 
@@ -678,11 +204,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   /* ------------------------------------------------------------- */
   const idleCount = stagedFiles.filter((f) => f.status === "idle").length;
   const isAllDone = stagedFiles.length > 0 && stagedFiles.every((f) => f.status === "done");
+  const displayCode = activeSessionCode || codeInput || "CONNECTED";
 
   return (
     <div className="w-full flex flex-col gap-6">
-      <ToastStack toasts={toasts} onDismiss={dismiss} />
-
       {/* Top Telemetry & Session Header */}
       <section className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-surface-container-low border border-white/[0.08] shadow-sm">
         <div className="flex flex-wrap items-center gap-3">
@@ -699,9 +224,9 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             <span className="font-label-caps text-on-surface-variant uppercase">Pairing Channel</span>
             <div className="flex items-center gap-1 text-secondary font-mono-telemetry font-bold tracking-wider">
               <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
-              <span>{linkedCode.slice(0, 4)}</span>
+              <span>{displayCode.slice(0, 4)}</span>
               <span className="text-outline-variant">-</span>
-              <span>{linkedCode.slice(4, 8)}</span>
+              <span>{displayCode.slice(4, 8)}</span>
             </div>
           </div>
 
@@ -798,7 +323,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                     {stagedFiles.length} item{stagedFiles.length > 1 ? "s" : ""}
                   </span>
                 </div>
-                {(transferPhase === "idle" || transferPhase === "done") && (
+                {(outboundPhase === "idle" || outboundPhase === "done") && (
                   <button
                     onClick={clearAllStaged}
                     className="font-body-sm text-on-surface-variant hover:text-error transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -819,7 +344,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                     <div className="flex items-center justify-between gap-3 min-w-0">
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="w-10 h-10 rounded-lg bg-surface-container-highest border border-white/[0.06] flex items-center justify-center shrink-0">
-                          <FileTypeIcon name={item.name} size={20} />
+                          <FileTypeIcon filename={item.name} size={20} />
                         </div>
                         <div className="flex flex-col min-w-0">
                           <span className="font-body-md font-medium text-on-surface truncate" title={item.name}>
@@ -850,19 +375,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                 <span className="inline-flex items-center gap-1.5">
                                   <span>{item.error || "Failed"}</span>
                                   <button
-                                    onClick={() =>
-                                      setStagedFiles((prev) =>
-                                        prev.map((f) =>
-                                          f.id === item.id
-                                            ? { ...f, status: "idle", error: undefined, progress: 0 }
-                                            : f,
-                                        ),
-                                      )
-                                    }
-                                    className="text-primary hover:underline font-semibold cursor-pointer ml-1"
-                                    type="button"
+                                    onClick={() => retryFailedFile(item.id)}
+                                    className="text-primary hover:underline flex items-center gap-0.5 cursor-pointer"
                                   >
-                                    Retry
+                                    <RefreshCw size={11} /> Retry
                                   </button>
                                 </span>
                               )}
@@ -872,28 +388,27 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                 </>
                               )}
                               {item.status === "requesting" && "Awaiting Approval"}
-                              {item.status === "idle" && "Staged"}
+                              {item.status === "idle" && "Ready to Stream"}
                             </span>
                           </div>
                         </div>
                       </div>
 
-                      <button
-                        onClick={() => removeStagedItem(item.id)}
-                        disabled={item.status === "uploading" || item.status === "requesting"}
-                        className="p-1.5 text-on-surface-variant hover:text-error rounded-lg hover:bg-surface-container-lowest transition-colors cursor-pointer disabled:opacity-30"
-                        title="Remove payload segment"
-                        type="button"
-                      >
-                        <X size={16} />
-                      </button>
+                      {item.status === "idle" && (
+                        <button
+                          onClick={() => removeStagedItem(item.id)}
+                          className="p-1.5 text-on-surface-variant hover:text-error transition-colors rounded-lg hover:bg-surface-container-highest cursor-pointer"
+                          title="Remove from queue"
+                        >
+                          <X size={16} />
+                        </button>
+                      )}
                     </div>
 
-                    {/* Per-file progress bar when uploading */}
                     {item.status === "uploading" && (
-                      <div className="w-full bg-surface-container-highest h-1.5 rounded-full overflow-hidden">
+                      <div className="w-full h-1.5 rounded-full bg-surface-container-highest overflow-hidden">
                         <div
-                          className="bg-secondary h-full rounded-full transition-all duration-150"
+                          className="h-full bg-secondary transition-all duration-100 rounded-full"
                           style={{ width: `${item.progress}%` }}
                         />
                       </div>
@@ -901,112 +416,71 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                   </div>
                 ))}
               </div>
-
-              {/* Volume Telemetry Meter */}
-              <div className="mt-2 pt-4 border-t border-white/[0.06] flex flex-col gap-2">
-                <div className="flex items-center justify-between font-mono-telemetry">
-                  <span className="text-on-surface-variant flex items-center gap-1.5">
-                    <MemoryStick size={14} className="text-secondary" />
-                    <span>BATCH VOLUME</span>
-                  </span>
-                  <span className="text-secondary font-medium">
-                    {formatSize(totalStagedBytes)} • Unlimited P2P Transfer
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between font-mono-telemetry text-on-surface-variant text-xs">
-                  <span>Zero storage quota · Streamed in 32 KB binary slices</span>
-                  <span className="text-tertiary">Direct P2P Pipe</span>
-                </div>
-              </div>
             </div>
           )}
         </div>
 
-        {/* Right: Expiration Rules & Trigger Panel (4 cols) */}
+        {/* Right: Transfer Controls & System Specs (4 cols) */}
         <div className="lg:col-span-4 flex flex-col gap-5">
-          {/* Direct P2P Architecture Card */}
-          <div className="rounded-2xl bg-surface-container-low p-5 sm:p-6 border border-white/[0.08] flex flex-col gap-4 shadow-sm">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-on-surface">
-                <Layers size={18} className="text-secondary" />
-                <h3 className="font-headline-md">Zero Cloud Storage</h3>
+          <div className="rounded-2xl bg-surface-container-low p-6 border border-white/[0.08] shadow-xl flex flex-col gap-5">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
+                <Layers size={20} />
               </div>
-              <span className="font-label-caps text-secondary bg-surface-container px-2 py-0.5 rounded border border-white/[0.04] uppercase">
-                Direct P2P
-              </span>
-            </div>
-
-            <p className="font-body-sm text-on-surface-variant leading-relaxed">
-              Files travel directly between browsers through SCTP data channels. Chunks are buffered on-demand with automatic
-              backpressure throttling, keeping memory footprint low.
-            </p>
-
-            <div className="p-3 rounded-xl bg-surface-container border border-white/[0.04] flex flex-col gap-2">
-              <div className="flex items-center justify-between font-mono-telemetry text-xs">
-                <span className="text-on-surface-variant">SCTP MTU Traversal:</span>
-                <span className="text-on-surface">32 KB Chunks</span>
-              </div>
-              <div className="flex items-center justify-between font-mono-telemetry text-xs">
-                <span className="text-on-surface-variant">Backpressure Throttling:</span>
-                <span className="text-tertiary">256 KB Limit</span>
-              </div>
-              <div className="flex items-center justify-between font-mono-telemetry text-xs">
-                <span className="text-on-surface-variant">Transit Storage:</span>
-                <span className="text-secondary font-semibold">0 Bytes in Cloud</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Upload Execution Card */}
-          <div className="rounded-2xl bg-surface-container-low p-5 sm:p-6 border border-white/[0.08] flex flex-col gap-4 shadow-sm">
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between font-mono-telemetry">
-                <span className="text-on-surface-variant">SECURITY PROTOCOL</span>
-                <span className="text-tertiary">DTLS-SRTP / GCM</span>
-              </div>
-              <div className="flex items-center justify-between font-mono-telemetry">
-                <span className="text-on-surface-variant">TARGET PEER</span>
-                <span className="text-on-surface">Connected Recipient</span>
-              </div>
-              <div className="flex items-center justify-between font-mono-telemetry">
-                <span className="text-on-surface-variant">TRANSPORT ENGINE</span>
-                <span className="text-secondary">WebRTC DataChannel</span>
+              <div>
+                <h3 className="font-headline-md text-on-surface">Transfer Dispatch</h3>
+                <span className="font-mono-telemetry text-on-surface-variant">
+                  {idleCount > 0 ? `${idleCount} pending` : "Queue idle"}
+                </span>
               </div>
             </div>
 
-            {/* Primary Action Button */}
+            <div className="flex flex-col gap-3 py-2 border-y border-white/[0.06] font-body-sm text-on-surface-variant">
+              <div className="flex justify-between items-center">
+                <span>Total Staged Size:</span>
+                <span className="font-mono-data text-on-surface font-medium">
+                  {formatSize(stagedFiles.reduce((acc, f) => acc + f.size, 0))}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Transport Target:</span>
+                <span className="font-mono-telemetry text-secondary">#cf-{displayCode}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Stream Protocol:</span>
+                <span className="font-mono-telemetry text-tertiary">SCTP Chunk Streaming</span>
+              </div>
+            </div>
+
+            {/* Action Trigger Button */}
             <button
               onClick={triggerTransferRequest}
-              disabled={idleCount === 0 || transferPhase === "awaiting-approval" || transferPhase === "transferring"}
-              className="w-full py-3.5 px-4 rounded-xl bg-secondary text-on-secondary font-headline-md font-semibold hover:bg-secondary-fixed transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              disabled={
+                stagedFiles.length === 0 ||
+                idleCount === 0 ||
+                outboundPhase === "awaiting-approval" ||
+                outboundPhase === "transferring"
+              }
+              className="w-full py-3.5 px-4 rounded-xl bg-primary text-on-primary font-body-md font-semibold hover:bg-primary-container hover:text-on-primary-container transition-all flex items-center justify-center gap-2 shadow-lg active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
-              {transferPhase === "awaiting-approval" ? (
+              {outboundPhase === "awaiting-approval" ? (
                 <>
-                  <Loader2 size={20} className="animate-spin text-on-secondary" />
+                  <Loader2 size={18} className="animate-spin" />
                   <span>Awaiting Recipient Approval...</span>
                 </>
-              ) : transferPhase === "transferring" ? (
+              ) : outboundPhase === "transferring" ? (
                 <>
-                  <Loader2 size={20} className="animate-spin text-on-secondary" />
-                  <span>Streaming P2P DataChannel...</span>
-                </>
-              ) : idleCount > 0 ? (
-                <>
-                  <CloudUpload size={20} />
-                  <span>
-                    Begin Direct Transfer ({idleCount} file{idleCount > 1 ? "s" : ""})
-                  </span>
-                </>
-              ) : isAllDone ? (
-                <>
-                  <Check size={20} />
-                  <span>Transfer Completed • Add More Files</span>
+                  <Loader2 size={18} className="animate-spin" />
+                  <span>Streaming via WebRTC...</span>
                 </>
               ) : (
                 <>
-                  <CloudUpload size={20} />
-                  <span>Stage Files Above</span>
+                  <MemoryStick size={18} />
+                  <span>
+                    {isAllDone && idleCount === 0
+                      ? "Batch Completed"
+                      : `Transfer ${idleCount > 0 ? `${idleCount} Item${idleCount > 1 ? "s" : ""}` : "Files"}`}
+                  </span>
                 </>
               )}
             </button>

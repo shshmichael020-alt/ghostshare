@@ -71,14 +71,17 @@ const EXT_MAP: Record<string, ExtConfig> = {
 
 export function FileTypeIcon({
   name,
+  filename,
   className = "",
   size = 20,
 }: {
-  name: string;
+  name?: string;
+  filename?: string;
   className?: string;
   size?: number;
 }) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const targetName = name || filename || "";
+  const ext = targetName.split(".").pop()?.toLowerCase() ?? "";
   const config = EXT_MAP[ext] ?? { icon: FileGeneric, colorClass: "text-on-surface-variant" };
   const Icon = config.icon;
 

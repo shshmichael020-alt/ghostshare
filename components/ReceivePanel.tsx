@@ -1,22 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import PinDisplay from "./PinDisplay";
 import { FileTypeIcon } from "./FileTypeIcon";
-import ToastStack from "./ToastStack";
-import { useToasts } from "@/lib/useToasts";
 import { formatSize, formatCountdown } from "@/lib/format";
 import { EXPIRY_OPTIONS, DEFAULT_TTL_SECONDS } from "@/lib/constants";
-import { createIncomingFileSink, OpfsFileStreamer, isOpfsSupported } from "@/lib/opfs";
-import {
-  createPeerConnection,
-  sendSignalMessage,
-  fetchSignalMessages,
-  waitForIceGathering,
-  TransferManifestFile,
-  WebRTCMessage,
-} from "@/lib/webrtc";
+import { isOpfsSupported } from "@/lib/opfs";
+import { useGhostSession } from "@/context/SessionContext";
 import {
   Key,
   QrCode,
@@ -38,542 +29,55 @@ import {
   HardDrive,
 } from "lucide-react";
 
-export interface ReceivedFileItem {
-  id: string;
-  name: string;
-  size: number;
-  downloadUrl: string;
-  blob: Blob | File;
-  receivedAt: number;
-}
-
 interface ReceivePanelProps {
   onOpenSecurity?: () => void;
 }
 
 export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
-  const [code, setCode] = useState<string | null>(null);
-  const [connStatus, setConnStatus] = useState<"idle" | "awaiting" | "connecting" | "connected" | "reconnecting" | "failed">("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [natWarning, setNatWarning] = useState<string | null>(null);
-  const [expired, setExpired] = useState(false);
-  const [remaining, setRemaining] = useState<number | null>(null);
-  const [initialTtl, setInitialTtl] = useState<number>(DEFAULT_TTL_SECONDS); // 1 hour (3600s) default
-  const [copiedLink, setCopiedLink] = useState(false);
+  const {
+    code,
+    connStatus,
+    error,
+    natWarning,
+    remainingTtl: remaining,
+    initialTtl,
+    copiedLink,
+    startHostSession,
+    updateExpiryWindow,
+    copyLink,
+    shareLink,
+    pendingApproval,
+    handleAcceptTransfer,
+    handleDeclineTransfer,
+    activeReceiving,
+    receivedFiles,
+    downloadAllFiles,
+  } = useGhostSession();
+
   const [downloadingAll, setDownloadingAll] = useState(false);
-
-  // Transfer approval state
-  const [pendingApproval, setPendingApproval] = useState<{
-    batchId?: string;
-    files: TransferManifestFile[];
-  } | null>(null);
-
-  // In-flight receiving file state
-  const [activeReceiving, setActiveReceiving] = useState<{
-    id: string;
-    name: string;
-    size: number;
-    receivedBytes: number;
-  } | null>(null);
-
-  // Completed files manifest
-  const [receivedFiles, setReceivedFiles] = useState<ReceivedFileItem[]>([]);
-
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastSignalSeq = useRef<number>(0);
-  const codeRef = useRef<string | null>(null);
-  const receiverTokenRef = useRef<string | null>(null);
+  const expired = remaining !== null && remaining <= 0;
   const hasMountedRef = useRef<boolean>(false);
-  const hasAnsweredRef = useRef<boolean>(false);
-  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
 
-  // Active OPFS/stream sink for zero-RAM direct-to-disk streaming
-  const activeSinkRef = useRef<OpfsFileStreamer | null>(null);
-  const pendingChunksRef = useRef<ArrayBuffer[]>([]);
-  const currentMetaRef = useRef<{ id: string; name: string; size: number; mimeType: string } | null>(null);
-
-  const { toasts, push, dismiss } = useToasts();
-
-  // Reset and cleanup peer connection & data channel
-  const cleanupConnection = useCallback(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (tickRef.current) clearInterval(tickRef.current);
-    pendingChunksRef.current = [];
-    pendingCandidatesRef.current = [];
-    hasAnsweredRef.current = false;
-    if (dcRef.current) {
-      dcRef.current.close();
-      dcRef.current = null;
-    }
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
-  }, []);
-
-  // Handle incoming data channel setup
-  const setupDataChannel = useCallback((channel: RTCDataChannel) => {
-    dcRef.current = channel;
-    channel.binaryType = "arraybuffer";
-    channel.bufferedAmountLowThreshold = 64 * 1024;
-
-    channel.onopen = () => {
-      setConnStatus("connected");
-      push("Direct P2P bridge established with Sender", "success");
-    };
-
-    channel.onclose = () => {
-      // Don't erase received files! If sender leaves after transfer, files stay in OPFS
-      setConnStatus((prev) => (prev === "connected" ? "awaiting" : prev));
-      push("Peer connection closed (Received files remain ready)", "default");
-    };
-
-    channel.onerror = (err) => {
-      console.error("Data channel error:", err);
-    };
-
-    channel.onmessage = async (event) => {
-      if (typeof event.data === "string") {
-        try {
-          const msg = JSON.parse(event.data) as WebRTCMessage;
-
-          if (msg.type === "transfer-request") {
-            setPendingApproval({ batchId: msg.batchId, files: msg.files });
-            push(`Sender requested to transfer ${msg.files.length} file(s)`, "default");
-          } else if (msg.type === "file-start") {
-            currentMetaRef.current = {
-              id: msg.id,
-              name: msg.name,
-              size: msg.size,
-              mimeType: msg.mimeType,
-            };
-
-            const startOffset = msg.offset ?? 0;
-            pendingChunksRef.current = [];
-
-            try {
-              // Stream directly onto local disk/OPFS with collision-free fileId and size check
-              const sink = await createIncomingFileSink(
-                codeRef.current || "default",
-                msg.id,
-                msg.name,
-                msg.mimeType,
-                msg.size,
-                startOffset,
-              );
-              activeSinkRef.current = sink;
-
-              // Drain any chunks that arrived while the sink handle was opening
-              if (pendingChunksRef.current.length > 0) {
-                for (const earlyChunk of pendingChunksRef.current) {
-                  await sink.write(earlyChunk);
-                }
-                pendingChunksRef.current = [];
-              }
-
-              setActiveReceiving({
-                id: msg.id,
-                name: msg.name,
-                size: msg.size,
-                receivedBytes: sink.getBytesWritten(),
-              });
-
-              // Signal sender that sink is ready
-              channel.send(JSON.stringify({ type: "file-ready", id: msg.id }));
-            } catch (sinkErr) {
-              console.error("Sink allocation error:", sinkErr);
-              channel.send(JSON.stringify({ type: "file-error", id: msg.id, error: (sinkErr as Error).message }));
-              push(`Storage error for ${msg.name}: ${(sinkErr as Error).message}`, "error");
-            }
-          } else if (msg.type === "file-end") {
-            const meta = currentMetaRef.current;
-            const sink = activeSinkRef.current;
-
-            if (meta && sink) {
-              try {
-                const file = await sink.close();
-                const downloadUrl = URL.createObjectURL(file);
-                const completedItem: ReceivedFileItem = {
-                  id: meta.id,
-                  name: meta.name,
-                  size: file.size,
-                  downloadUrl,
-                  blob: file,
-                  receivedAt: Date.now(),
-                };
-
-                setReceivedFiles((prev) => {
-                  const existing = prev.filter((f) => f.id !== meta.id);
-                  return [...existing, completedItem];
-                });
-
-                setActiveReceiving(null);
-                activeSinkRef.current = null;
-                currentMetaRef.current = null;
-
-                // Acknowledge file completion
-                channel.send(JSON.stringify({ type: "file-ack", id: meta.id }));
-                push(`Received: ${meta.name} (Verified & Persisted)`, "success");
-              } catch (closeErr) {
-                console.error("File finalization error:", closeErr);
-                channel.send(JSON.stringify({ type: "file-error", id: meta.id, error: (closeErr as Error).message }));
-                push(`Verification failed for ${meta.name}: ${(closeErr as Error).message}`, "error");
-                setActiveReceiving(null);
-                activeSinkRef.current = null;
-                currentMetaRef.current = null;
-              }
-            }
-          } else if (msg.type === "resume-query") {
-            // Sender asks how many bytes receiver has for this file
-            const bytesWritten = activeSinkRef.current?.getBytesWritten() ?? 0;
-            const ackMsg: WebRTCMessage = {
-              type: "resume-ack",
-              id: msg.id,
-              receivedBytes: bytesWritten,
-            };
-            channel.send(JSON.stringify(ackMsg));
-          } else if (msg.type === "transfer-complete") {
-            setActiveReceiving(null);
-            setPendingApproval(null);
-            push("Batch transferred successfully!", "success");
-          }
-        } catch (e) {
-          console.error("Failed to parse data channel message:", e);
-        }
-      } else if (event.data instanceof ArrayBuffer || (typeof Blob !== "undefined" && event.data instanceof Blob)) {
-        // Binary chunk received -> stream directly to OPFS disk handle
-        let buffer: ArrayBuffer;
-        if (event.data instanceof ArrayBuffer) {
-          buffer = event.data;
-        } else {
-          buffer = await (event.data as Blob).arrayBuffer();
-        }
-
-        if (activeSinkRef.current) {
-          await activeSinkRef.current.write(buffer);
-          setActiveReceiving((prev) => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              receivedBytes: prev.receivedBytes + buffer.byteLength,
-            };
-          });
-        } else {
-          // Pre-buffer any chunk that arrives before sink handle resolves
-          pendingChunksRef.current.push(buffer);
-        }
-      }
-    };
-  }, [push]);
-
-  // Initialize a new receiving session and peer connection
-  const startSession = useCallback(async (selectedTtl: number = DEFAULT_TTL_SECONDS) => {
-    cleanupConnection();
-    setError(null);
-    setNatWarning(null);
-    setExpired(false);
-    setReceivedFiles([]);
-    setPendingApproval(null);
-    setActiveReceiving(null);
-    codeRef.current = null;
-    setCode(null);
-    setRemaining(null);
-    setConnStatus("idle");
-    lastSignalSeq.current = 0;
-
-    try {
-      // 1. Create signaling session with requested TTL (default 1 hour = 3600s)
-      const res = await fetch("/api/signal/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ttlSeconds: selectedTtl }),
-      });
-
-      if (!res.ok) {
-        const errData = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(errData.error || "Could not start receiving session");
-      }
-      const data = (await res.json()) as { code: string; expiresAt: number; receiverToken?: string };
-      const currentCode = data.code;
-      codeRef.current = currentCode;
-      receiverTokenRef.current = data.receiverToken || null;
-      setCode(currentCode);
-      const rem = Math.max(0, Math.round((data.expiresAt - Date.now()) / 1000));
-      setRemaining(rem);
-      setInitialTtl(rem || selectedTtl);
-      setConnStatus("awaiting");
-
-      // 2. Initialize RTCPeerConnection
-      const pc = createPeerConnection();
-      pcRef.current = pc;
-
-      // Batch ICE candidates with 200ms debounce to prevent mobile network flooding & KV collisions
-      let candDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-      const outgoingCandidates: RTCIceCandidateInit[] = [];
-
-      const flushCandidates = () => {
-        if (outgoingCandidates.length > 0) {
-          const batch = [...outgoingCandidates];
-          outgoingCandidates.length = 0;
-          sendSignalMessage(
-            currentCode,
-            "receiver",
-            "sender",
-            "candidate-batch",
-            batch,
-            receiverTokenRef.current || undefined,
-          );
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          outgoingCandidates.push(event.candidate.toJSON());
-          if (candDebounceTimer) clearTimeout(candDebounceTimer);
-          candDebounceTimer = setTimeout(flushCandidates, 200);
-        } else {
-          if (candDebounceTimer) clearTimeout(candDebounceTimer);
-          flushCandidates();
-        }
-      };
-
-      // Monitor connection & ICE health with Auto-Recovery
-      pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-          setConnStatus("connected");
-          setNatWarning(null);
-        } else if (pc.iceConnectionState === "disconnected") {
-          // Network paused, peer connection will attempt silent ICE restart
-          setConnStatus("reconnecting");
-        } else if (pc.iceConnectionState === "failed") {
-          setConnStatus("failed");
-          setNatWarning(
-            "Direct P2P UDP path could not be established. Check if either device is on a restricted firewall.",
-          );
-        }
-      };
-
-      // Listen for data channel created by sender
-      pc.ondatachannel = (event) => {
-        setupDataChannel(event.channel);
-      };
-
-      // 3. Start signaling poll loop with monotonic sequence cursor
-      pollRef.current = setInterval(async () => {
-        try {
-          const pollRes = await fetchSignalMessages(
-            currentCode,
-            "receiver",
-            lastSignalSeq.current,
-            receiverTokenRef.current || undefined,
-          );
-
-          if (pollRes.cursor > lastSignalSeq.current) {
-            lastSignalSeq.current = pollRes.cursor;
-          }
-
-          for (const msg of pollRes.messages) {
-            if (msg.type === "offer") {
-              if (hasAnsweredRef.current || pc.signalingState !== "stable") {
-                continue;
-              }
-              hasAnsweredRef.current = true;
-              setConnStatus("connecting");
-              const offerDesc = msg.data as RTCSessionDescriptionInit;
-              await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
-
-              // Drain any queued ICE candidates that arrived before the offer
-              if (pendingCandidatesRef.current.length > 0) {
-                for (const cand of pendingCandidatesRef.current) {
-                  try {
-                    await pc.addIceCandidate(new RTCIceCandidate(cand));
-                  } catch (drainErr) {
-                    console.warn("Drain ICE candidate error:", drainErr);
-                  }
-                }
-                pendingCandidatesRef.current = [];
-              }
-
-              const answer = await pc.createAnswer();
-              await pc.setLocalDescription(answer);
-
-              // Pre-gather initial candidates into SDP (2200ms timeout or resolves immediately on completion)
-              await waitForIceGathering(pc, 2200);
-              const finalAnswer = pc.localDescription
-                ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
-                : { type: answer.type, sdp: answer.sdp };
-
-              await sendSignalMessage(
-                currentCode,
-                "receiver",
-                "sender",
-                "answer",
-                finalAnswer,
-                receiverTokenRef.current || undefined,
-              );
-            } else if (msg.type === "candidate-batch" || msg.type === "candidate") {
-              const cands: RTCIceCandidateInit[] =
-                msg.type === "candidate-batch" && Array.isArray(msg.data)
-                  ? (msg.data as RTCIceCandidateInit[])
-                  : [msg.data as RTCIceCandidateInit];
-
-              for (const candidate of cands) {
-                if (pc.remoteDescription) {
-                  try {
-                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                  } catch (iceErr) {
-                    console.warn("Failed to add ICE candidate:", iceErr);
-                  }
-                } else {
-                  pendingCandidatesRef.current.push(candidate);
-                }
-              }
-            } else if (msg.type === "leave") {
-              setConnStatus("awaiting");
-              push("Sender closed the session", "default");
-            }
-          }
-        } catch {
-          // Transient network error
-        }
-      }, 600);
-    } catch (e) {
-      setError((e as Error).message);
-      setConnStatus("failed");
-    }
-  }, [cleanupConnection, setupDataChannel, push]);
-
-  // Initialize session on mount (guarded to run once)
+  // Initialize host session on mount if no active session
   useEffect(() => {
     if (hasMountedRef.current) return;
     hasMountedRef.current = true;
-    startSession(DEFAULT_TTL_SECONDS);
-    return () => {
-      cleanupConnection();
-    };
-  }, [startSession, cleanupConnection]);
+    if (connStatus === "idle" && !code) {
+      startHostSession(DEFAULT_TTL_SECONDS);
+    }
+  }, [connStatus, code, startHostSession]);
 
-  // Update session TTL dynamically when user picks a different expiration window
-  const updateExpiryWindow = async (newSeconds: number) => {
-    setInitialTtl(newSeconds);
-    setRemaining(newSeconds);
-    if (!code) return;
-
+  const handleDownloadAll = async () => {
+    setDownloadingAll(true);
     try {
-      await fetch(`/api/signal/session/${code}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ttlSeconds: newSeconds, receiverToken: receiverTokenRef.current }),
-      });
-      push(`Session duration updated to ${EXPIRY_OPTIONS.find((o) => o.seconds === newSeconds)?.label}`, "default");
-    } catch {
-      // Ignored
+      await downloadAllFiles();
+    } finally {
+      setDownloadingAll(false);
     }
   };
 
-  // 1-second countdown ticker
-  useEffect(() => {
-    if (tickRef.current) clearInterval(tickRef.current);
-    tickRef.current = setInterval(() => {
-      setRemaining((r) => {
-        if (r === null) return null;
-        if (r <= 1) {
-          setExpired(true);
-          return 0;
-        }
-        return r - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (tickRef.current) clearInterval(tickRef.current);
-    };
-  }, [code]);
-
   const qrValue =
     typeof window !== "undefined" && code ? `${window.location.origin}/?mode=send&code=${code}` : "";
-
-  async function copyLink() {
-    if (!qrValue) return;
-    try {
-      await navigator.clipboard.writeText(qrValue);
-      setCopiedLink(true);
-      push("Direct pairing link copied to clipboard", "default");
-      setTimeout(() => setCopiedLink(false), 2000);
-    } catch {
-      // ignore
-    }
-  }
-
-  async function shareLink() {
-    if (!qrValue) return;
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: "GhostShare File Transfer",
-          text: `Connect to GhostShare WebRTC session with code ${code}`,
-          url: qrValue,
-        });
-      } catch {
-        // User dismissed share dialog
-      }
-    } else {
-      copyLink();
-    }
-  }
-
-  // Handle explicit receiver approval
-  function handleAcceptTransfer() {
-    if (!dcRef.current || dcRef.current.readyState !== "open") {
-      push("Connection not ready", "error");
-      return;
-    }
-    const acceptMsg: WebRTCMessage = {
-      type: "transfer-accept",
-      batchId: pendingApproval?.batchId,
-    };
-    dcRef.current.send(JSON.stringify(acceptMsg));
-    push("Transfer accepted. Streaming directly to local storage...", "success");
-    setPendingApproval(null);
-  }
-
-  function handleDeclineTransfer() {
-    if (dcRef.current && dcRef.current.readyState === "open") {
-      const declineMsg: WebRTCMessage = {
-        type: "transfer-decline",
-        batchId: pendingApproval?.batchId,
-        reason: "Declined by recipient",
-      };
-      dcRef.current.send(JSON.stringify(declineMsg));
-    }
-    push("Transfer declined", "default");
-    setPendingApproval(null);
-  }
-
-  // Sequential download of all received files
-  async function downloadAllFiles() {
-    if (receivedFiles.length === 0 || downloadingAll) return;
-    setDownloadingAll(true);
-    push(`Downloading ${receivedFiles.length} file${receivedFiles.length > 1 ? "s" : ""}...`, "default");
-
-    for (let i = 0; i < receivedFiles.length; i++) {
-      const file = receivedFiles[i];
-      const link = document.createElement("a");
-      link.href = file.downloadUrl;
-      link.download = file.name;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
-      if (i < receivedFiles.length - 1) {
-        await new Promise((r) => setTimeout(r, 600));
-      }
-    }
-    setDownloadingAll(false);
-  }
 
   const totalBytesReceived = receivedFiles.reduce((sum, f) => sum + f.size, 0);
   const progressRatio = remaining !== null && initialTtl > 0 ? Math.min(1, remaining / initialTtl) : 1;
@@ -581,8 +85,6 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
   return (
     <div className="w-full flex flex-col gap-6 relative">
-      <ToastStack toasts={toasts} onDismiss={dismiss} />
-
       {/* Screen Header with Telemetry */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
@@ -671,7 +173,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         <div className="p-4 rounded-xl bg-error-container/20 border border-error/30 text-error flex items-center justify-between">
           <span className="font-body-sm">{error}</span>
           <button
-            onClick={() => startSession(initialTtl)}
+            onClick={() => startHostSession(initialTtl)}
             className="px-3 py-1 bg-surface-container-high hover:bg-surface-bright rounded text-xs text-on-surface font-medium transition-colors cursor-pointer"
           >
             Retry
@@ -721,7 +223,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               className="px-5 py-2 rounded-lg bg-secondary text-on-secondary hover:bg-secondary-fixed transition-colors font-body-sm font-semibold flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
             >
               <CheckCircle2 size={16} />
-              <span>Accept & Stream Files</span>
+              <span>Accept &amp; Stream Files</span>
             </button>
           </div>
         </div>
@@ -740,7 +242,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             </p>
           </div>
           <button
-            onClick={() => startSession(initialTtl)}
+            onClick={() => startHostSession(initialTtl)}
             className="mt-2 flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary text-on-primary hover:bg-primary-container hover:text-on-primary-container font-body-sm font-medium transition-all shadow-md active:scale-95 cursor-pointer"
           >
             <RefreshCw size={16} />
@@ -795,7 +297,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 </div>
 
                 {/* Segmented Pin Display Component */}
-                <PinDisplay code={code} onCopy={() => push("Pairing code copied to clipboard", "default")} />
+                <PinDisplay code={code} onCopy={copyLink} />
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-white/[0.04]">
                   <span className="font-mono-telemetry">TRANSPORT: WebRTC DataChannel (SCTP)</span>
@@ -919,7 +421,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   </span>
                 </div>
                 <button
-                  onClick={downloadAllFiles}
+                  onClick={handleDownloadAll}
                   disabled={receivedFiles.length === 0 || downloadingAll}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-secondary text-on-secondary hover:bg-secondary-fixed font-body-sm font-semibold transition-all shadow-md active:scale-95 cursor-pointer disabled:opacity-50"
                 >
@@ -1000,7 +502,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 >
                   <div className="flex items-start gap-3.5 min-w-0">
                     <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-white/[0.06]">
-                      <FileTypeIcon name={file.name} size={22} />
+                      <FileTypeIcon filename={file.name} size={22} />
                     </div>
                     <div className="flex flex-col min-w-0 gap-1">
                       <div className="flex items-center gap-2 flex-wrap">

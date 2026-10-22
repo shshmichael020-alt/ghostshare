@@ -34,6 +34,13 @@ export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 220
 export const CHUNK_SIZE = 32 * 1024; // 32 KB chunk size for safe SCTP MTU traversal
 export const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256 KB high-water mark for backpressure
 
+export const DATA_CHANNEL_LABELS = {
+  CONTROL: "control",
+  FILES_JOINER_TO_CREATOR: "files-joiner-to-creator",
+  FILES_CREATOR_TO_JOINER: "files-creator-to-joiner",
+  LEGACY_FILE_TRANSFER: "file-transfer",
+} as const;
+
 export interface TransferManifestFile {
   id: string;
   name: string;
@@ -42,17 +49,88 @@ export interface TransferManifestFile {
 }
 
 export type WebRTCMessage =
-  | { type: "transfer-request"; files: TransferManifestFile[]; batchId?: string }
-  | { type: "transfer-accept"; batchId?: string }
-  | { type: "transfer-decline"; reason?: string; batchId?: string }
-  | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number; batchId?: string }
-  | { type: "file-ready"; id: string }
-  | { type: "file-end"; id: string }
-  | { type: "file-ack"; id: string }
-  | { type: "file-error"; id: string; error: string }
-  | { type: "resume-query"; id: string }
-  | { type: "resume-ack"; id: string; receivedBytes: number }
-  | { type: "transfer-complete"; batchId?: string };
+  | { type: "transfer-request"; files: TransferManifestFile[]; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "transfer-accept"; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "transfer-decline"; reason?: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-ready"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-end"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-ack"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-error"; id: string; error: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "resume-query"; id: string; senderRole?: "creator" | "joiner" }
+  | { type: "resume-ack"; id: string; receivedBytes: number; senderRole?: "creator" | "joiner" }
+  | { type: "transfer-complete"; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "chat"; id: string; text: string; sentAt: number; senderRole?: "creator" | "joiner"; senderName?: string };
+
+export const BINARY_FRAME_MAGIC = 0x4753; // 'GS' ASCII identifier
+
+/**
+ * Encodes a binary chunk with a structured framing header:
+ * [0..1] Magic bytes (0x47, 0x53)
+ * [2]    Version (0x01)
+ * [3]    Flags (0x00)
+ * [4]    File ID length N (1 byte)
+ * [5..5+N-1] File ID UTF-8 (N bytes)
+ * [5+N..5+N+3] Chunk Index (uint32 BE)
+ * [5+N+4..5+N+11] Chunk Offset (uint64 BE)
+ * [5+N+12..] Raw chunk binary payload
+ */
+export function encodeBinaryFrame(
+  fileId: string,
+  chunkIndex: number,
+  offset: number,
+  payload: ArrayBuffer,
+): ArrayBuffer {
+  const enc = new TextEncoder();
+  const idBytes = enc.encode(fileId);
+  if (idBytes.length > 255) {
+    throw new Error("File ID exceeds 255 bytes limit");
+  }
+  const headerLen = 5 + idBytes.length + 4 + 8;
+  const out = new Uint8Array(headerLen + payload.byteLength);
+  const view = new DataView(out.buffer);
+
+  view.setUint16(0, BINARY_FRAME_MAGIC, false);
+  view.setUint8(2, 1); // version 1
+  view.setUint8(3, 0); // flags
+  view.setUint8(4, idBytes.length);
+  out.set(idBytes, 5);
+
+  const idxOffset = 5 + idBytes.length;
+  view.setUint32(idxOffset, chunkIndex, false);
+  view.setBigUint64(idxOffset + 4, BigInt(offset), false);
+
+  out.set(new Uint8Array(payload), idxOffset + 12);
+  return out.buffer;
+}
+
+/**
+ * Decodes a binary frame. If magic bytes match, returns structured metadata & payload slice.
+ * If not matching magic bytes, returns null to allow raw unframed binary fallback.
+ */
+export function decodeBinaryFrame(
+  buffer: ArrayBuffer,
+): { fileId: string; chunkIndex: number; offset: number; payload: ArrayBuffer } | null {
+  if (buffer.byteLength < 18) return null;
+  const view = new DataView(buffer);
+  if (view.getUint16(0, false) !== BINARY_FRAME_MAGIC) {
+    return null;
+  }
+  const idLen = view.getUint8(4);
+  const headerLen = 5 + idLen + 4 + 8;
+  if (buffer.byteLength < headerLen) return null;
+
+  const idBytes = new Uint8Array(buffer, 5, idLen);
+  const dec = new TextDecoder();
+  const fileId = dec.decode(idBytes);
+
+  const idxOffset = 5 + idLen;
+  const chunkIndex = view.getUint32(idxOffset, false);
+  const offset = Number(view.getBigUint64(idxOffset + 4, false));
+
+  const payload = buffer.slice(idxOffset + 12);
+  return { fileId, chunkIndex, offset, payload };
+}
 
 /**
  * Creates an RTCPeerConnection with public STUN servers and standard SCTP configuration.
@@ -109,7 +187,8 @@ export async function sendChunkWithBackpressure(
 /**
  * Streams a single File chunk-by-chunk across RTCDataChannel.
  * Slices the file on demand so large payloads never saturate browser RAM.
- * Enforces explicit receiver readiness and write completion acknowledgements.
+ * Frames each chunk with structured metadata and enforces explicit readiness and write acknowledgements.
+ * Control messages (signals) can optionally use a dedicated controlChannel to avoid backpressure head-of-line blocking.
  */
 export async function streamFileOverDataChannel(
   channel: RTCDataChannel,
@@ -118,15 +197,18 @@ export async function streamFileOverDataChannel(
   startOffset: number = 0,
   onProgress: (sentBytes: number, totalBytes: number) => void,
   isCancelled: () => boolean,
+  controlChannel?: RTCDataChannel,
+  batchId?: string,
 ): Promise<void> {
-  if (channel.readyState !== "open") {
+  const ctrl = controlChannel || channel;
+  if (channel.readyState !== "open" || ctrl.readyState !== "open") {
     throw new Error("Data channel is not open");
   }
 
   const total = file.size;
   let offset = Math.min(startOffset, total);
 
-  // Signal start of file transmission with unique ID and offset
+  // Signal start of file transmission with unique ID, batch ID, and offset on control channel
   const startMsg: WebRTCMessage = {
     type: "file-start",
     id: fileId,
@@ -134,8 +216,9 @@ export async function streamFileOverDataChannel(
     size: file.size,
     mimeType: file.type || "application/octet-stream",
     offset,
+    batchId,
   };
-  channel.send(JSON.stringify(startMsg));
+  ctrl.send(JSON.stringify(startMsg));
 
   // Await explicit receiver file-ready confirmation before sending binary data
   await new Promise<void>((resolve, reject) => {
@@ -163,12 +246,12 @@ export async function streamFileOverDataChannel(
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
-      channel.removeEventListener("message", onMessage);
-      channel.removeEventListener("close", onClose);
+      ctrl.removeEventListener("message", onMessage);
+      ctrl.removeEventListener("close", onClose);
     };
 
-    channel.addEventListener("message", onMessage);
-    channel.addEventListener("close", onClose);
+    ctrl.addEventListener("message", onMessage);
+    ctrl.addEventListener("close", onClose);
 
     timer = setTimeout(() => {
       cleanup();
@@ -176,7 +259,8 @@ export async function streamFileOverDataChannel(
     }, 8000);
   });
 
-  // Stream binary slices with backpressure flow control
+  // Stream binary slices with backpressure flow control and framed metadata
+  let chunkIndex = 0;
   while (offset < total) {
     if (isCancelled()) {
       throw new Error("Transfer cancelled by user");
@@ -188,20 +272,24 @@ export async function streamFileOverDataChannel(
 
     const end = Math.min(offset + CHUNK_SIZE, total);
     const slice = file.slice(offset, end);
-    const buffer = await slice.arrayBuffer();
+    const rawBuffer = await slice.arrayBuffer();
 
-    await sendChunkWithBackpressure(channel, buffer);
+    // Frame the binary chunk with fileId, chunkIndex, and byte offset for concurrent routing safety
+    const framedChunk = encodeBinaryFrame(fileId, chunkIndex, offset, rawBuffer);
+    await sendChunkWithBackpressure(channel, framedChunk);
 
     offset = end;
+    chunkIndex++;
     onProgress(offset, total);
   }
 
-  // Signal end of file
+  // Signal end of file on control channel
   const endMsg: WebRTCMessage = {
     type: "file-end",
     id: fileId,
+    batchId,
   };
-  channel.send(JSON.stringify(endMsg));
+  ctrl.send(JSON.stringify(endMsg));
 
   // Await explicit completion acknowledgement from receiver after disk flush
   await new Promise<void>((resolve, reject) => {
@@ -229,12 +317,12 @@ export async function streamFileOverDataChannel(
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
-      channel.removeEventListener("message", onMessage);
-      channel.removeEventListener("close", onClose);
+      ctrl.removeEventListener("message", onMessage);
+      ctrl.removeEventListener("close", onClose);
     };
 
-    channel.addEventListener("message", onMessage);
-    channel.addEventListener("close", onClose);
+    ctrl.addEventListener("message", onMessage);
+    ctrl.addEventListener("close", onClose);
 
     timer = setTimeout(() => {
       cleanup();

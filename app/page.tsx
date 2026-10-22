@@ -6,14 +6,13 @@ import Header from "@/components/Header";
 import SecurityModal from "@/components/SecurityModal";
 import SendPanel from "@/components/SendPanel";
 import ReceivePanel from "@/components/ReceivePanel";
+import DualPanel from "@/components/DualPanel";
+import EphemeralChat from "@/components/EphemeralChat";
+import { SessionProvider, useGhostSession } from "@/context/SessionContext";
 import { Shield, Radio, Lock } from "lucide-react";
 
-function GhostShareHome() {
-  const searchParams = useSearchParams();
-  const initialMode = searchParams.get("mode") === "send" ? "send" : "receive";
-  const initialCode = searchParams.get("code") ?? undefined;
-
-  const [mode, setMode] = useState<"receive" | "send">(initialMode);
+function GhostShareContent({ initialCode }: { initialCode?: string }) {
+  const { mode, setMode } = useGhostSession();
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
 
   return (
@@ -37,11 +36,16 @@ function GhostShareHome() {
         <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 flex flex-col">
           {mode === "receive" ? (
             <ReceivePanel onOpenSecurity={() => setIsSecurityOpen(true)} />
-          ) : (
+          ) : mode === "send" ? (
             <SendPanel initialCode={initialCode} />
+          ) : (
+            <DualPanel />
           )}
         </div>
       </main>
+
+      {/* Floating Ephemeral Live Chat (RAM-only, zero-storage) */}
+      <EphemeralChat />
 
       {/* Footer */}
       <footer className="w-full border-t border-white/[0.06] bg-surface-container-lowest/80 py-6 text-on-surface-variant font-body-sm">
@@ -69,10 +73,24 @@ function GhostShareHome() {
   );
 }
 
+function GhostShareWrapper() {
+  const searchParams = useSearchParams();
+  const rawMode = searchParams.get("mode");
+  const initialMode =
+    rawMode === "send" ? "send" : rawMode === "dual" ? "dual" : "receive";
+  const initialCode = searchParams.get("code") ?? undefined;
+
+  return (
+    <SessionProvider initialMode={initialMode}>
+      <GhostShareContent initialCode={initialCode} />
+    </SessionProvider>
+  );
+}
+
 export default function Page() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-canvas-default" />}>
-      <GhostShareHome />
+      <GhostShareWrapper />
     </Suspense>
   );
 }
