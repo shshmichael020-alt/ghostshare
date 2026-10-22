@@ -20,6 +20,17 @@ export const metadata: Metadata = {
     "Direct browser-to-browser file transfer via Cloudflare R2 and Workers KV. Zero accounts, zero login, automatic self-destruction.",
   keywords: ["file transfer", "p2p", "ephemeral", "privacy", "r2", "cloudflare"],
   authors: [{ name: "GhostShare" }],
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icon.png", type: "image/png", sizes: "32x32" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    apple: [
+      { url: "/apple-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
+  manifest: "/manifest.webmanifest",
 };
 
 export const viewport: Viewport = {

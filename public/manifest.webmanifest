@@ -1,0 +1,26 @@
+{
+  "name": "GhostShare — Ephemeral Direct Peer Transfer",
+  "short_name": "GhostShare",
+  "description": "Direct browser-to-browser file transfer via WebRTC P2P SCTP data channels. Zero cloud file storage, self-destructing data tunnels.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0c10",
+  "theme_color": "#0a0c10",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
