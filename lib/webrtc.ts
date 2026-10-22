@@ -5,13 +5,14 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun3.l.google.com:19302" },
   { urls: "stun:stun4.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
+  { urls: "stun:global.stun.twilio.com:3478" },
 ];
 
 /**
  * Waits for ICE gathering to complete or times out gracefully.
  * Pre-gathers initial host and STUN candidates directly into the offer/answer SDP.
  */
-export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 800): Promise<void> {
+export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2200): Promise<void> {
   if (pc.iceGatheringState === "complete") return;
   return new Promise<void>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -58,7 +59,7 @@ export type WebRTCMessage =
 export function createPeerConnection(customIceServers?: RTCIceServer[]): RTCPeerConnection {
   const config: RTCConfiguration = {
     iceServers: customIceServers && customIceServers.length > 0 ? customIceServers : DEFAULT_ICE_SERVERS,
-    iceCandidatePoolSize: 2,
+    iceCandidatePoolSize: 4,
   };
   return new RTCPeerConnection(config);
 }
@@ -231,7 +232,7 @@ export async function sendSignalMessage(
   code: string,
   sender: "receiver" | "sender",
   target: "receiver" | "sender",
-  type: "offer" | "answer" | "candidate" | "ping" | "leave",
+  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave",
   data: unknown,
 ): Promise<boolean> {
   try {

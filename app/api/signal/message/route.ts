@@ -7,7 +7,7 @@ export async function POST(request: Request) {
       code?: string;
       sender?: "receiver" | "sender";
       target?: "receiver" | "sender";
-      type?: "offer" | "answer" | "candidate" | "ping" | "leave";
+      type?: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave";
       data?: unknown;
     };
 

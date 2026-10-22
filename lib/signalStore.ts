@@ -4,7 +4,7 @@ export interface SignalMessage {
   id: string;
   sender: "receiver" | "sender";
   target: "receiver" | "sender";
-  type: "offer" | "answer" | "candidate" | "ping" | "leave";
+  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave";
   data: unknown;
   timestamp: number;
 }
@@ -176,7 +176,7 @@ export async function postSignalMessage(
         // Dedicated mailbox for primary offer/answer handshake messages
         if (type === "offer" || type === "answer") {
           await kv.put(`sig:${code}:${target}`, JSON.stringify(msg), { expirationTtl: ttl });
-        } else if (type === "candidate") {
+        } else if (type === "candidate" || type === "candidate-batch") {
           // Store candidates in dedicated list without overwriting offer/answer
           const existingCands = (await kv.get<SignalMessage[]>(`cands:${code}:${target}`, "json")) || [];
           existingCands.push(msg);

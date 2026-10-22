@@ -34,6 +34,12 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
       return;
     }
 
+    // If mobile keyboard autofilled or sent multiple digits
+    if (clean.length > 1) {
+      applyPastedCode(clean);
+      return;
+    }
+
     const next = [...digits];
     next[index] = clean[clean.length - 1]; // take the latest digit
     updateDigits(next);
