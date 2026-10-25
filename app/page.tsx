@@ -12,15 +12,29 @@ import { SessionProvider, useGhostSession } from "@/context/SessionContext";
 import { Shield, Radio, Lock } from "lucide-react";
 
 function GhostShareContent({ initialCode }: { initialCode?: string }) {
-  const { mode, setMode } = useGhostSession();
+  const { mode, setMode, connStatus, disconnectSession } = useGhostSession();
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
+
+  const handleModeChange = (newMode: "receive" | "send" | "dual") => {
+    if (newMode !== mode) {
+      if (connStatus !== "connected") {
+        disconnectSession();
+      }
+      setMode(newMode);
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("mode", newMode);
+        window.history.replaceState(null, "", url.toString());
+      }
+    }
+  };
 
   return (
     <div className="min-h-screen flex flex-col justify-between bg-surface selection:bg-primary-container selection:text-on-primary-container relative overflow-x-hidden">
       {/* Brand Header */}
       <Header
         mode={mode}
-        onModeChange={(m) => setMode(m)}
+        onModeChange={handleModeChange}
         onOpenSecurity={() => setIsSecurityOpen(true)}
       />
 

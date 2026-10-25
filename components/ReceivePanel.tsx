@@ -62,7 +62,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
   useEffect(() => {
     if (hasMountedRef.current) return;
     hasMountedRef.current = true;
-    if (connStatus === "idle" && !code) {
+    if ((connStatus === "idle" || connStatus === "disconnected") && !code) {
       startHostSession(DEFAULT_TTL_SECONDS);
     }
   }, [connStatus, code, startHostSession]);

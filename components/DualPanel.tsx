@@ -370,10 +370,19 @@ export default function DualPanel() {
             </div>
           )}
 
-          <div className="pt-2">
+          <div className="pt-3 flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
+              type="button"
               onClick={disconnectSession}
-              className="text-xs text-on-surface-variant hover:text-error transition-colors underline cursor-pointer"
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-white/[0.08] text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
+            >
+              <ArrowLeftRight size={14} className="text-secondary" />
+              <span>Join a Peer Instead</span>
+            </button>
+            <button
+              type="button"
+              onClick={disconnectSession}
+              className="text-xs text-on-surface-variant hover:text-error transition-colors underline cursor-pointer py-1"
             >
               Cancel Session
             </button>
