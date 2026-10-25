@@ -102,16 +102,16 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
   }
 
   return (
-    <div className="flex flex-col gap-3 items-center w-full">
-      <div className="flex items-center justify-between w-full max-w-sm px-1">
-        <label className="font-label-caps text-on-surface-variant flex items-center gap-1.5">
+    <div className="flex flex-col gap-2.5 items-center w-full">
+      <div className="flex items-center justify-between w-full px-0.5">
+        <label className="font-label-caps text-on-surface-variant flex items-center gap-1.5 text-[11px] sm:text-xs">
           <span>RECIPIENT SESSION TOKEN</span>
         </label>
         <button
           type="button"
           onClick={pasteFromClipboard}
           disabled={disabled}
-          className="flex items-center gap-1 text-xs font-mono-telemetry text-secondary hover:text-secondary-fixed transition-colors cursor-pointer bg-surface-container-high px-2 py-1 rounded border border-white/[0.04]"
+          className="flex items-center gap-1 text-[11px] sm:text-xs font-mono-telemetry text-secondary hover:text-secondary-fixed transition-colors cursor-pointer bg-surface-container-high px-2 py-1 rounded border border-white/[0.04]"
         >
           <Clipboard size={12} />
           <span>Paste Code</span>
@@ -119,9 +119,9 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
       </div>
 
       {/* 8-box segmented input grid */}
-      <div className="flex items-center justify-center gap-1.5 sm:gap-2.5 py-2">
+      <div className="w-full flex items-center justify-center gap-1 sm:gap-1.5 py-1">
         {/* First group of 4 */}
-        <div className="flex items-center gap-1 sm:gap-1.5">
+        <div className="flex items-center gap-1 sm:gap-1.5 flex-1 justify-end max-w-[170px]">
           {[0, 1, 2, 3].map((i) => (
             <input
               key={i}
@@ -136,17 +136,17 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              className="w-9 sm:w-11 h-13 sm:h-14 bg-surface-container-lowest text-center font-mono-pairing-code text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
+              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
               aria-label={`Digit ${i + 1}`}
             />
           ))}
         </div>
 
         {/* Separator */}
-        <div className="text-outline-variant font-mono-pairing-code select-none px-1">−</div>
+        <div className="text-outline-variant font-mono-pairing-code select-none px-0.5 sm:px-1 shrink-0">−</div>
 
         {/* Second group of 4 */}
-        <div className="flex items-center gap-1 sm:gap-1.5">
+        <div className="flex items-center gap-1 sm:gap-1.5 flex-1 justify-start max-w-[170px]">
           {[4, 5, 6, 7].map((i) => (
             <input
               key={i}
@@ -161,7 +161,7 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              className="w-9 sm:w-11 h-13 sm:h-14 bg-surface-container-lowest text-center font-mono-pairing-code text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
+              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
               aria-label={`Digit ${i + 1}`}
             />
           ))}

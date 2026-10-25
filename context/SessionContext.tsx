@@ -579,12 +579,14 @@ export function SessionProvider({
           }
         };
 
+        let hasEverConnected = false;
         let iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
         const updateConnState = () => {
           const iceState = pc.iceConnectionState;
           const connState = pc.connectionState;
 
           if (iceState === "connected" || iceState === "completed" || connState === "connected") {
+            hasEverConnected = true;
             if (iceDisconnectTimer) {
               clearTimeout(iceDisconnectTimer);
               iceDisconnectTimer = null;
@@ -592,14 +594,14 @@ export function SessionProvider({
             setConnStatus("connected");
             setNatWarning(null);
             setError(null);
-          } else if (iceState === "disconnected") {
-            // Grace period: transient mobile carrier latency
+          } else if (iceState === "disconnected" && hasEverConnected) {
+            // Grace period: transient mobile carrier latency (only after initial connection was established)
             if (!iceDisconnectTimer) {
               iceDisconnectTimer = setTimeout(() => {
-                if (pc.iceConnectionState === "disconnected") {
+                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc && hasEverConnected) {
                   setConnStatus("reconnecting");
                 }
-              }, 4000);
+              }, 5000);
             }
           } else if (iceState === "failed" || connState === "failed") {
             if (iceDisconnectTimer) {
@@ -680,7 +682,7 @@ export function SessionProvider({
 
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-                await waitForIceGathering(pc, 2200);
+                await waitForIceGathering(pc, 600);
 
                 const finalAnswer = pc.localDescription
                   ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
@@ -833,12 +835,14 @@ export function SessionProvider({
           }
         };
 
+        let hasEverConnected = false;
         let iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
         const updateConnState = () => {
           const iceState = pc.iceConnectionState;
           const connState = pc.connectionState;
 
           if (iceState === "connected" || iceState === "completed" || connState === "connected") {
+            hasEverConnected = true;
             if (iceDisconnectTimer) {
               clearTimeout(iceDisconnectTimer);
               iceDisconnectTimer = null;
@@ -846,15 +850,15 @@ export function SessionProvider({
             setConnStatus("connected");
             setNatWarning(null);
             setError(null);
-          } else if (iceState === "disconnected") {
-            // Grace period: transient mobile carrier latency
+          } else if (iceState === "disconnected" && hasEverConnected) {
+            // Grace period: transient mobile carrier latency (only after initial connection was established)
             if (!iceDisconnectTimer) {
               iceDisconnectTimer = setTimeout(() => {
-                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc) {
+                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc && hasEverConnected) {
                   setConnStatus("reconnecting");
                   triggerIceRestart(pc, codeToJoin, "sender", "receiver", currentToken || undefined);
                 }
-              }, 4000);
+              }, 5000);
             }
           } else if (iceState === "failed" || connState === "failed") {
             if (iceDisconnectTimer) {
@@ -874,7 +878,7 @@ export function SessionProvider({
         // 4. Create and send offer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await waitForIceGathering(pc, 2200);
+        await waitForIceGathering(pc, 600);
 
         const finalOffer = pc.localDescription
           ? { type: pc.localDescription.type, sdp: pc.localDescription.sdp }

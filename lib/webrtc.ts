@@ -1,19 +1,18 @@
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-  // High-performance public STUN endpoints
+  // High-performance Anycast public STUN endpoints
+  { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun3.l.google.com:19302" },
   { urls: "stun:stun4.l.google.com:19302" },
-  { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:global.stun.twilio.com:3478" },
-  // OpenRelay TURN servers for Symmetric NAT & Mobile Carrier (CGNAT) traversal
+  // OpenRelay TURN servers (UDP) for Symmetric NAT & Carrier traversal
   {
     urls: [
-      "stun:openrelay.metered.ca:80",
-      "turn:openrelay.metered.ca:80",
-      "turn:openrelay.metered.ca:443",
-      "turn:openrelay.metered.ca:443?transport=tcp",
+      "turn:relay.metered.ca:80",
+      "turn:relay.metered.ca:443",
+      "turn:staticauth.openrelay.metered.ca:3478",
     ],
     username: "openrelayproject",
     credential: "openrelayproject",
@@ -24,7 +23,7 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
  * Waits for ICE gathering to complete or times out gracefully.
  * Pre-gathers initial host and STUN candidates directly into the offer/answer SDP.
  */
-export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2200): Promise<void> {
+export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 600): Promise<void> {
   if (pc.iceGatheringState === "complete") return;
   return new Promise<void>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | null = null;

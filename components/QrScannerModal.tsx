@@ -10,12 +10,16 @@ interface QrScannerModalProps {
 }
 
 function extractCode(text: string): string | null {
-  const digitsOnly = text.match(/^\d{8}$/);
-  if (digitsOnly) return digitsOnly[0];
+  const trimmed = text.trim();
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length === 8) return digits;
   try {
-    const url = new URL(text);
+    const url = new URL(trimmed);
     const c = url.searchParams.get("code");
-    if (c && /^\d{8}$/.test(c)) return c;
+    if (c) {
+      const clean = c.replace(/\D/g, "");
+      if (clean.length === 8) return clean;
+    }
   } catch {
     // not a valid url
   }
@@ -40,28 +44,61 @@ export default function QrScannerModal({ isOpen, onClose, onScanSuccess }: QrSca
         const qr = new Html5Qrcode("qr-scanner-element");
         html5QrRef.current = qr;
 
-        await qr.start(
-          { facingMode: "environment" },
-          {
-            fps: 10,
-            qrbox: { width: 220, height: 220 },
-            aspectRatio: 1.0,
+        const config = {
+          fps: 15,
+          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const edge = Math.floor(minEdge * 0.75);
+            return { width: Math.max(edge, 160), height: Math.max(edge, 160) };
           },
-          async (decodedText) => {
-            const code = extractCode(decodedText);
-            if (code) {
-              try {
-                await qr.stop();
-                qr.clear();
-              } catch {
-                // ignore
-              }
-              onScanSuccess(code);
-              onClose();
+        };
+
+        const onScan = async (decodedText: string) => {
+          const code = extractCode(decodedText);
+          if (code) {
+            try {
+              await qr.stop();
+              qr.clear();
+            } catch {
+              // ignore
             }
-          },
-          undefined,
-        );
+            onScanSuccess(code);
+            onClose();
+          }
+        };
+
+        // Enumerate video devices first
+        let cameras: { id: string; label: string }[] = [];
+        try {
+          cameras = await Html5Qrcode.getCameras();
+        } catch {
+          // Camera enumeration may require prior permission
+        }
+
+        let started = false;
+        if (cameras && cameras.length > 0) {
+          // If back camera is detected, use it; otherwise use the primary webcam
+          const backCam = cameras.find((c) => /back|rear|environment/i.test(c.label));
+          const selectedCamId = backCam ? backCam.id : cameras[0].id;
+          try {
+            await qr.start(selectedCamId, config, onScan, undefined);
+            started = true;
+          } catch (camErr) {
+            console.warn("Direct deviceId start failed, trying facingMode:", camErr);
+          }
+        }
+
+        if (!started) {
+          try {
+            await qr.start({ facingMode: "environment" }, config, onScan, undefined);
+            started = true;
+          } catch (envErr) {
+            console.warn("Environment facingMode failed, falling back to user camera:", envErr);
+            await qr.start({ facingMode: "user" }, config, onScan, undefined);
+            started = true;
+          }
+        }
+
         if (isMounted) {
           setInitializing(false);
           setError(null);
