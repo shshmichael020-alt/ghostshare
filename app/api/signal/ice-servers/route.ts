@@ -31,11 +31,49 @@ export async function GET() {
     }
   } catch {}
 
+  const cfTurnKeyId = env.CLOUDFLARE_TURN_KEY_ID || process.env.CLOUDFLARE_TURN_KEY_ID;
+  const cfTurnApiToken = env.CLOUDFLARE_TURN_API_TOKEN || process.env.CLOUDFLARE_TURN_API_TOKEN;
   const meteredApiKey = env.METERED_API_KEY || process.env.METERED_API_KEY;
   const meteredAppName = env.METERED_APP_NAME || process.env.METERED_APP_NAME;
   const turnServersJson = env.TURN_SERVERS_JSON || process.env.TURN_SERVERS_JSON;
 
-  // Option 1: Custom JSON servers provided via Cloudflare Worker secret
+  // Option 1: Cloudflare Calls Managed TURN Service (1,000 GB / 1 TB per month free)
+  if (cfTurnKeyId && cfTurnApiToken) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${cfTurnKeyId}/credentials/generate-ice-servers`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${cfTurnApiToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ttl: 86400 }),
+          signal: controller.signal,
+        },
+      );
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        const data = (await res.json()) as { iceServers?: RTCIceServer[] };
+        if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+          cachedIceServers = [...DEFAULT_STUN_SERVERS, ...data.iceServers];
+          cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours
+          return NextResponse.json({
+            iceServers: cachedIceServers,
+            turnConfigured: true,
+            source: "cloudflare-calls-turn",
+          });
+        }
+      }
+    } catch (cfErr) {
+      console.warn("Cloudflare Calls TURN dynamic credential error:", cfErr);
+    }
+  }
+
+  // Option 2: Custom JSON servers provided via Cloudflare Worker secret
   if (turnServersJson) {
     try {
       const parsed = JSON.parse(turnServersJson) as RTCIceServer[];
