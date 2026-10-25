@@ -345,19 +345,13 @@ export async function streamFileOverDataChannel(
     });
   }
 
-  // Signal end of file on both the file data channel (in-order with chunks) and the control channel
+  // Signal end of file on control channel
   const endMsg: WebRTCMessage = {
     type: "file-end",
     id: fileId,
     batchId,
   };
-  const endPayload = JSON.stringify(endMsg);
-  try {
-    channel.send(endPayload);
-  } catch {}
-  try {
-    ctrl.send(endPayload);
-  } catch {}
+  ctrl.send(JSON.stringify(endMsg));
 
   // Await explicit completion acknowledgement from receiver after disk flush
   await new Promise<void>((resolve, reject) => {

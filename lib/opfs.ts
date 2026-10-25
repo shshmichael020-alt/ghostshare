@@ -78,6 +78,7 @@ export async function createIncomingFileSink(
         let bytesWritten = startOffset;
         const writtenOffsets = new Set<number>();
         let writeChain: Promise<void> = Promise.resolve();
+        let closePromise: Promise<File> | null = null;
 
         return {
           write: async (chunk: ArrayBuffer, offset?: number) => {
@@ -101,21 +102,31 @@ export async function createIncomingFileSink(
             await writeChain;
           },
           close: async () => {
-            await writeChain;
-            try {
-              await writable.truncate(expectedSize);
-            } catch {}
-            await writable.close();
-            const rawFile = await fileHandle.getFile();
+            if (closePromise) return closePromise;
+            closePromise = (async () => {
+              await writeChain;
+              try {
+                await writable.truncate(expectedSize);
+              } catch {}
+              try {
+                await writable.close();
+              } catch (closeErr) {
+                if (!String(closeErr).includes("closed or closing")) {
+                  throw closeErr;
+                }
+              }
+              const rawFile = await fileHandle.getFile();
 
-            // Strict length verification before marking file complete
-            if (rawFile.size !== expectedSize) {
-              throw new Error(
-                `Transferred byte length mismatch: expected ${expectedSize} bytes, but wrote ${rawFile.size} bytes`,
-              );
-            }
+              // Strict length verification before marking file complete
+              if (rawFile.size !== expectedSize) {
+                throw new Error(
+                  `Transferred byte length mismatch: expected ${expectedSize} bytes, but wrote ${rawFile.size} bytes`,
+                );
+              }
 
-            return new File([rawFile], fileName, { type: mimeType || "application/octet-stream" });
+              return new File([rawFile], fileName, { type: mimeType || "application/octet-stream" });
+            })();
+            return closePromise;
           },
           getBytesWritten: () => bytesWritten,
         };

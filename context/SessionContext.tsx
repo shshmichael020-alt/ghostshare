@@ -341,6 +341,10 @@ export function SessionProvider({
         } else if (msg.type === "file-end") {
           const active = activeSinksRef.current.get(msg.id);
           if (active) {
+            // Delete immediately so duplicate triggers are strictly ignored
+            activeSinksRef.current.delete(msg.id);
+            setActiveReceiving(null);
+
             const expectedSize = active.meta.size;
             // Wait for any remaining in-flight chunks to arrive and be written to disk
             let waited = 0;
@@ -365,9 +369,6 @@ export function SessionProvider({
                 const existing = prev.filter((f) => f.id !== active.meta.id);
                 return [...existing, completedItem];
               });
-
-              activeSinksRef.current.delete(msg.id);
-              setActiveReceiving(null);
 
               const ctrl = dcControlRef.current;
               if (ctrl && ctrl.readyState === "open") {
