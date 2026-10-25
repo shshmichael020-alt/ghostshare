@@ -13,6 +13,8 @@ const DEFAULT_STUN_SERVERS: RTCIceServer[] = [
   { urls: "stun:global.stun.twilio.com:3478" },
 ];
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const now = Date.now();
   if (cachedIceServers && now < cacheExpiresAt) {
@@ -24,10 +26,12 @@ export async function GET() {
   }
 
   let env: Record<string, string | undefined> = {};
+  let envKeys: string[] = [];
   try {
     const ctx = getCloudflareContext();
     if (ctx?.env) {
       env = ctx.env as Record<string, string | undefined>;
+      envKeys = Object.keys(ctx.env);
     }
   } catch {}
 
@@ -73,10 +77,12 @@ export async function GET() {
     }
   }
 
+  let parseError: string | null = null;
   // Option 2: Custom JSON servers provided via Cloudflare Worker secret
   if (turnServersJson) {
     try {
-      const parsed = JSON.parse(turnServersJson) as RTCIceServer[];
+      const cleanJson = turnServersJson.trim().replace(/^\uFEFF/, "");
+      const parsed = JSON.parse(cleanJson) as RTCIceServer[];
       if (Array.isArray(parsed) && parsed.length > 0) {
         cachedIceServers = [...DEFAULT_STUN_SERVERS, ...parsed];
         cacheExpiresAt = now + 60 * 60 * 1000; // 1 hour
@@ -86,7 +92,8 @@ export async function GET() {
           source: "custom-json",
         });
       }
-    } catch (err) {
+    } catch (err: unknown) {
+      parseError = String(err);
       console.warn("Failed to parse TURN_SERVERS_JSON:", err);
     }
   }

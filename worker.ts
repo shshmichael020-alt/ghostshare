@@ -4,8 +4,45 @@ import { default as openNextHandler } from "./.open-next/worker.js";
 
 export { SignalingSessionDO };
 
+const DEFAULT_STUN_SERVERS = [
+  { urls: "stun:stun.cloudflare.com:3478" },
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:global.stun.twilio.com:3478" },
+];
+
 export default {
-  fetch(request: Request, env: Record<string, unknown>, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Record<string, unknown>, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+
+    // Fast-path /api/signal/ice-servers directly from Cloudflare Worker env secrets
+    if (url.pathname === "/api/signal/ice-servers") {
+      const turnServersJson = env.TURN_SERVERS_JSON as string | undefined;
+      if (turnServersJson) {
+        try {
+          const parsed = JSON.parse(turnServersJson);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return new Response(
+              JSON.stringify({
+                iceServers: [...DEFAULT_STUN_SERVERS, ...parsed],
+                turnConfigured: true,
+                source: "worker-turn-secret",
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/json",
+                  "Cache-Control": "no-store, no-cache, must-revalidate",
+                },
+              },
+            );
+          }
+        } catch (err) {
+          console.error("Failed to parse TURN_SERVERS_JSON in worker:", err);
+        }
+      }
+    }
+
     return openNextHandler.fetch(request, env, ctx);
   },
 };
