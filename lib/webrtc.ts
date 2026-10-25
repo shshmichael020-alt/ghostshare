@@ -7,16 +7,37 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun3.l.google.com:19302" },
   { urls: "stun:stun4.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" },
-  // OpenRelay TURN servers (UDP) for Symmetric NAT & Carrier traversal
+  // OpenRelay TURN servers with multi-transport (UDP, TCP, and TLS)
   {
     urls: [
-      "turn:relay.metered.ca:80",
-      "turn:relay.metered.ca:443",
+      "turn:openrelay.metered.ca:80",
+      "turn:openrelay.metered.ca:443",
+      "turn:openrelay.metered.ca:443?transport=tcp",
     ],
     username: "openrelayproject",
     credential: "openrelayproject",
   },
 ];
+
+/**
+ * Fetches dynamic ICE configuration from server-side endpoint if available,
+ * gracefully falling back to DEFAULT_ICE_SERVERS on error or timeout.
+ */
+export async function fetchIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch("/api/signal/ice-servers", { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = (await res.json()) as { iceServers?: RTCIceServer[] };
+      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        return data.iceServers;
+      }
+    }
+  } catch {}
+  return DEFAULT_ICE_SERVERS;
+}
 
 /**
  * Waits for ICE gathering to complete or times out gracefully.

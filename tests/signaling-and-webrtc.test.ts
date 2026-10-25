@@ -19,6 +19,7 @@ import {
   MAX_BUFFERED_AMOUNT,
   WebRTCMessage,
   isValidIceCandidateInit,
+  fetchIceServers,
 } from "../lib/webrtc";
 
 test("WebRTC Constants: CHUNK_SIZE and backpressure thresholds adhere to safe SCTP limits", () => {
@@ -164,4 +165,17 @@ test("Signaling Store: session lifecycle, joining, posting, and role-filtered po
   const closeRes = await closeSignalingSession(testCode, receiverToken);
   assert.equal(closeRes.ok, true);
   assert.equal(await getSignalingSession(testCode), null);
+});
+
+test("ICE Server Discovery: fetchIceServers falls back safely to default Anycast endpoints", async () => {
+  const servers = await fetchIceServers();
+  assert.ok(Array.isArray(servers) && servers.length >= 2, "Must return valid list of ICE servers");
+  assert.ok(
+    servers.some((s) => typeof s.urls === "string" && s.urls.includes("stun")),
+    "ICE servers must contain STUN endpoints",
+  );
+  assert.ok(
+    servers.some((s) => Array.isArray(s.urls) && s.urls.some((u) => u.includes("turn"))),
+    "ICE servers must support TURN endpoints",
+  );
 });

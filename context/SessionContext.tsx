@@ -11,6 +11,7 @@ import React, {
 } from "react";
 import {
   createPeerConnection,
+  fetchIceServers,
   waitForIceGathering,
   streamFileOverDataChannel,
   decodeBinaryFrame,
@@ -567,7 +568,8 @@ export function SessionProvider({
         setInitialTtl(rem || selectedTtl);
         setConnStatus("awaiting");
 
-        const pc = createPeerConnection();
+        const iceServers = await fetchIceServers();
+        const pc = createPeerConnection(iceServers);
         pcRef.current = pc;
 
         // Debounced candidate dispatch
@@ -579,7 +581,16 @@ export function SessionProvider({
           try {
             await targetPc.addIceCandidate(new RTCIceCandidate(cand));
           } catch (err) {
-            console.warn("Non-fatal ICE candidate insertion:", err);
+            const rawCand = typeof cand.candidate === "string" ? cand.candidate : "";
+            const typMatch = rawCand.match(/typ\s+(\w+)/);
+            const candType = typMatch ? typMatch[1] : "unknown";
+            const protoMatch = rawCand.match(/\b(udp|tcp)\b/i);
+            const candProto = protoMatch ? protoMatch[1].toLowerCase() : "unknown";
+            console.warn(
+              `[WebRTC ICE Diagnostic] Candidate (${candProto}/${candType}) rejected:`,
+              (err as Error).name,
+              (err as Error).message,
+            );
           }
         };
 
@@ -701,15 +712,14 @@ export function SessionProvider({
                 const offer = item.data as RTCSessionDescriptionInit;
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-
-                // Drain pending candidates only after answer is set and connection is stable
+                // Drain candidates received before remoteDescription was established
                 for (const cand of pendingCandidatesRef.current) {
                   await safeAddCandidate(pc, cand);
                 }
                 pendingCandidatesRef.current = [];
 
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
                 await waitForIceGathering(pc, 600);
 
                 const finalAnswer = pc.localDescription
@@ -727,7 +737,7 @@ export function SessionProvider({
               } else if (item.type === "candidate-batch") {
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
-                  if (pc.remoteDescription && pc.signalingState === "stable") {
+                  if (pc.remoteDescription) {
                     await safeAddCandidate(pc, cand);
                   } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
@@ -826,7 +836,8 @@ export function SessionProvider({
         lastSignalSeqRef.current = 0;
 
         // 3. Create PeerConnection & Separate Data Channels
-        const pc = createPeerConnection();
+        const iceServers = await fetchIceServers();
+        const pc = createPeerConnection(iceServers);
         pcRef.current = pc;
 
         const safeAddCandidate = async (targetPc: RTCPeerConnection, cand: RTCIceCandidateInit) => {
@@ -834,7 +845,16 @@ export function SessionProvider({
           try {
             await targetPc.addIceCandidate(new RTCIceCandidate(cand));
           } catch (err) {
-            console.warn("Non-fatal ICE candidate insertion:", err);
+            const rawCand = typeof cand.candidate === "string" ? cand.candidate : "";
+            const typMatch = rawCand.match(/typ\s+(\w+)/);
+            const candType = typMatch ? typMatch[1] : "unknown";
+            const protoMatch = rawCand.match(/\b(udp|tcp)\b/i);
+            const candProto = protoMatch ? protoMatch[1].toLowerCase() : "unknown";
+            console.warn(
+              `[WebRTC ICE Diagnostic] Candidate (${candProto}/${candType}) rejected:`,
+              (err as Error).name,
+              (err as Error).message,
+            );
           }
         };
 
@@ -975,7 +995,7 @@ export function SessionProvider({
               } else if (item.type === "candidate-batch") {
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
-                  if (pc.remoteDescription && pc.signalingState === "stable") {
+                  if (pc.remoteDescription) {
                     await safeAddCandidate(pc, cand);
                   } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
