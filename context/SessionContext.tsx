@@ -187,7 +187,7 @@ export function SessionProvider({
       }
     >
   >(new Map());
-  const pendingChunksRef = useRef<Map<string, ArrayBuffer[]>>(new Map());
+  const pendingChunksRef = useRef<Map<string, { payload: ArrayBuffer; offset?: number }[]>>(new Map());
 
   // Ephemeral Live Chat (In-memory ONLY)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -283,6 +283,10 @@ export function SessionProvider({
           currentOutboundBatchIdRef.current = null;
         } else if (msg.type === "file-start") {
           const startOffset = msg.offset ?? 0;
+          if (startOffset === 0) {
+            // Fresh transfer or retry: purge any stale chunks from previous aborted attempts
+            pendingChunksRef.current.delete(msg.id);
+          }
           try {
             const streamer = await createIncomingFileSink(
               code || "default",
@@ -301,7 +305,7 @@ export function SessionProvider({
             const early = pendingChunksRef.current.get(msg.id);
             if (early && early.length > 0) {
               for (const c of early) {
-                await streamer.write(c);
+                await streamer.write(c.payload, c.offset);
               }
               pendingChunksRef.current.delete(msg.id);
             }
@@ -403,10 +407,12 @@ export function SessionProvider({
     const frame = decodeBinaryFrame(rawBuffer);
     let targetFileId: string | null = null;
     let payload: ArrayBuffer = rawBuffer;
+    let chunkOffset: number | undefined = undefined;
 
     if (frame) {
       targetFileId = frame.fileId;
       payload = frame.payload;
+      chunkOffset = frame.offset;
     } else {
       // Fallback: if unframed raw binary, route to currently active sink
       if (activeReceivingRef.current) {
@@ -417,13 +423,13 @@ export function SessionProvider({
     if (targetFileId) {
       const active = activeSinksRef.current.get(targetFileId);
       if (active) {
-        await active.streamer.write(payload);
+        await active.streamer.write(payload, chunkOffset);
         setActiveReceiving((prev) =>
           prev && prev.id === targetFileId ? { ...prev, receivedBytes: active.streamer.getBytesWritten() } : prev,
         );
       } else {
         const buffered = pendingChunksRef.current.get(targetFileId) || [];
-        buffered.push(payload);
+        buffered.push({ payload, offset: chunkOffset });
         pendingChunksRef.current.set(targetFileId, buffered);
       }
     }
@@ -1122,6 +1128,7 @@ export function SessionProvider({
       cancelTransferRef.current = false;
       const activeBatchId = currentOutboundBatchIdRef.current;
       const pending = stagedFilesRef.current.filter((f) => f.status === "requesting");
+      let hasErrors = false;
 
       for (const item of pending) {
         if (!isSubscribed || cancelTransferRef.current) break;
@@ -1154,6 +1161,7 @@ export function SessionProvider({
           );
           pushToast(`${item.name} transferred directly!`, "success");
         } catch (err) {
+          hasErrors = true;
           if (!isSubscribed) return;
           const msg = (err as Error).message || "Streaming interrupted";
           setStagedFiles((prev) =>
@@ -1164,11 +1172,16 @@ export function SessionProvider({
       }
 
       if (isSubscribed && !cancelTransferRef.current) {
-        ctrl.send(JSON.stringify({ type: "transfer-complete", batchId: activeBatchId ?? undefined }));
-        const hasRemainingIdle = stagedFilesRef.current.some((f) => f.status === "idle");
-        setOutboundPhase(hasRemainingIdle ? "idle" : "done");
-        currentOutboundBatchIdRef.current = null;
-        pushToast("Batch transferred to peer successfully!", "success");
+        if (!hasErrors) {
+          ctrl.send(JSON.stringify({ type: "transfer-complete", batchId: activeBatchId ?? undefined }));
+          const hasRemainingIdle = stagedFilesRef.current.some((f) => f.status === "idle");
+          setOutboundPhase(hasRemainingIdle ? "idle" : "done");
+          currentOutboundBatchIdRef.current = null;
+          pushToast("Batch transferred to peer successfully!", "success");
+        } else {
+          setOutboundPhase("idle");
+          currentOutboundBatchIdRef.current = null;
+        }
       }
     }
 

@@ -9,7 +9,7 @@
  */
 
 export interface OpfsFileStreamer {
-  write: (chunk: ArrayBuffer) => Promise<void>;
+  write: (chunk: ArrayBuffer, offset?: number) => Promise<void>;
   close: () => Promise<File>;
   getBytesWritten: () => number;
 }
@@ -67,17 +67,30 @@ export async function createIncomingFileSink(
       const fileHandle = await dir.getFileHandle(storageKey, { create: true });
       if (typeof fileHandle.createWritable === "function") {
         const writable = await fileHandle.createWritable({ keepExistingData: startOffset > 0 });
-        if (startOffset > 0) {
+        if (startOffset === 0) {
+          try {
+            await writable.truncate(0);
+          } catch {}
+        } else if (startOffset > 0) {
           await writable.seek(startOffset);
         }
 
         let bytesWritten = startOffset;
+        const writtenOffsets = new Set<number>();
         let writeChain: Promise<void> = Promise.resolve();
 
         return {
-          write: async (chunk: ArrayBuffer) => {
+          write: async (chunk: ArrayBuffer, offset?: number) => {
             writeChain = writeChain.then(async () => {
               try {
+                if (typeof offset === "number") {
+                  if (writtenOffsets.has(offset)) {
+                    // Deduplicate chunk if already written to prevent byte corruption
+                    return;
+                  }
+                  writtenOffsets.add(offset);
+                  await writable.seek(offset);
+                }
                 await writable.write(chunk);
                 bytesWritten += chunk.byteLength;
               } catch (writeErr) {
@@ -89,6 +102,9 @@ export async function createIncomingFileSink(
           },
           close: async () => {
             await writeChain;
+            try {
+              await writable.truncate(expectedSize);
+            } catch {}
             await writable.close();
             const rawFile = await fileHandle.getFile();
 
@@ -116,24 +132,38 @@ export async function createIncomingFileSink(
     );
   }
 
-  const chunks: ArrayBuffer[] = [];
+  const chunksByOffset = new Map<number, ArrayBuffer>();
+  const unpositionedChunks: ArrayBuffer[] = [];
   let bytesWritten = startOffset;
 
   return {
-    write: async (chunk: ArrayBuffer) => {
-      if (bytesWritten + chunk.byteLength > MAX_RAM_FALLBACK_BYTES) {
-        throw new Error("Transfer exceeded memory limit for non-OPFS fallback");
+    write: async (chunk: ArrayBuffer, offset?: number) => {
+      if (typeof offset === "number") {
+        if (chunksByOffset.has(offset)) {
+          // Deduplicate chunk
+          return;
+        }
+        chunksByOffset.set(offset, chunk);
+      } else {
+        unpositionedChunks.push(chunk);
       }
-      chunks.push(chunk);
       bytesWritten += chunk.byteLength;
     },
     close: async () => {
-      if (bytesWritten !== expectedSize) {
+      let finalChunks: ArrayBuffer[];
+      if (chunksByOffset.size > 0) {
+        finalChunks = Array.from(chunksByOffset.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([, buf]) => buf);
+      } else {
+        finalChunks = unpositionedChunks;
+      }
+      const blob = new Blob(finalChunks, { type: mimeType || "application/octet-stream" });
+      if (blob.size !== expectedSize) {
         throw new Error(
-          `Transferred byte length mismatch: expected ${expectedSize} bytes, but received ${bytesWritten} bytes`,
+          `Transferred byte length mismatch: expected ${expectedSize} bytes, but received ${blob.size} bytes`,
         );
       }
-      const blob = new Blob(chunks, { type: mimeType || "application/octet-stream" });
       return new File([blob], fileName, { type: mimeType || "application/octet-stream" });
     },
     getBytesWritten: () => bytesWritten,
