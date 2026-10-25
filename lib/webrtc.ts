@@ -327,13 +327,37 @@ export async function streamFileOverDataChannel(
     onProgress(offset, total);
   }
 
-  // Signal end of file on control channel
+  // Ensure all queued binary chunks are completely flushed from the data channel buffer
+  while (channel.bufferedAmount > 0) {
+    if (channel.readyState !== "open") break;
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onLow = () => {
+        if (timer) clearTimeout(timer);
+        channel.removeEventListener("bufferedamountlow", onLow);
+        resolve();
+      };
+      channel.addEventListener("bufferedamountlow", onLow);
+      timer = setTimeout(() => {
+        channel.removeEventListener("bufferedamountlow", onLow);
+        resolve();
+      }, 30);
+    });
+  }
+
+  // Signal end of file on both the file data channel (in-order with chunks) and the control channel
   const endMsg: WebRTCMessage = {
     type: "file-end",
     id: fileId,
     batchId,
   };
-  ctrl.send(JSON.stringify(endMsg));
+  const endPayload = JSON.stringify(endMsg);
+  try {
+    channel.send(endPayload);
+  } catch {}
+  try {
+    ctrl.send(endPayload);
+  } catch {}
 
   // Await explicit completion acknowledgement from receiver after disk flush
   await new Promise<void>((resolve, reject) => {

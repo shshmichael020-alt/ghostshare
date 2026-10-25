@@ -341,6 +341,14 @@ export function SessionProvider({
         } else if (msg.type === "file-end") {
           const active = activeSinksRef.current.get(msg.id);
           if (active) {
+            const expectedSize = active.meta.size;
+            // Wait for any remaining in-flight chunks to arrive and be written to disk
+            let waited = 0;
+            while (active.streamer.getBytesWritten() < expectedSize && waited < 6000) {
+              await new Promise((r) => setTimeout(r, 40));
+              waited += 40;
+            }
+
             try {
               const file = await active.streamer.close();
               const downloadUrl = URL.createObjectURL(file);
