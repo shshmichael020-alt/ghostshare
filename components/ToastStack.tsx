@@ -12,7 +12,7 @@ export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
+    <div className="fixed top-4 inset-x-4 sm:top-5 sm:right-5 sm:left-auto sm:inset-x-auto sm:max-w-sm sm:w-full z-50 flex flex-col gap-2.5 max-w-md mx-auto pointer-events-none">
       {toasts.map((t) => {
         const isError = t.tone === "error";
         const isSuccess = t.tone === "success";
@@ -28,7 +28,7 @@ export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
                 : "bg-surface-container-high/95 border-white/[0.1] text-on-surface"
             }`}
           >
-            <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
               {isError ? (
                 <AlertCircle size={16} className="text-error shrink-0" />
               ) : isSuccess ? (
@@ -36,12 +36,12 @@ export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
               ) : (
                 <Info size={16} className="text-secondary shrink-0" />
               )}
-              <span className="font-body-sm font-medium truncate">{t.message}</span>
+              <span className="font-body-sm font-medium break-words text-xs sm:text-sm leading-snug">{t.message}</span>
             </div>
             {onDismiss && (
               <button
                 onClick={() => onDismiss(t.id)}
-                className="p-1 rounded text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer shrink-0"
+                className="p-1 rounded text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer shrink-0 ml-1"
                 aria-label="Dismiss toast"
               >
                 <X size={14} />

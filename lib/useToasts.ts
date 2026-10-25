@@ -19,7 +19,14 @@ export function useToasts() {
   const push = useCallback(
     (message: string, tone: Toast["tone"] = "default") => {
       const id = String(++idRef.current);
-      setToasts((prev) => [...prev, { id, message, tone }]);
+      setToasts((prev) => {
+        // Prevent duplicate consecutive toasts with identical message and tone
+        if (prev.length > 0 && prev[prev.length - 1].message === message) {
+          return prev;
+        }
+        // Limit visible toasts to max 3 on screen
+        return [...prev.slice(-2), { id, message, tone }];
+      });
       setTimeout(() => {
         dismiss(id);
       }, 4000);
