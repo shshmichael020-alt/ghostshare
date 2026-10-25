@@ -53,7 +53,7 @@ function GhostShareContent({ initialCode }: { initialCode?: string }) {
           ) : mode === "send" ? (
             <SendPanel initialCode={initialCode} />
           ) : (
-            <DualPanel />
+            <DualPanel initialCode={initialCode} />
           )}
         </div>
       </main>

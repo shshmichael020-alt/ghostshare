@@ -12,7 +12,7 @@ export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed top-4 inset-x-4 sm:top-5 sm:right-5 sm:left-auto sm:inset-x-auto sm:max-w-sm sm:w-full z-50 flex flex-col gap-2.5 max-w-md mx-auto pointer-events-none">
+    <div className="fixed top-20 inset-x-4 sm:top-20 sm:right-6 sm:left-auto sm:inset-x-auto sm:max-w-md sm:w-full z-50 flex flex-col gap-2.5 max-w-md mx-auto pointer-events-none">
       {toasts.map((t) => {
         const isError = t.tone === "error";
         const isSuccess = t.tone === "success";

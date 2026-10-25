@@ -295,6 +295,7 @@ export class SignalingSessionDO extends DurableObject {
 
   private async handlePostMessage(request: Request): Promise<Response> {
     const rows = this.sql.exec("SELECT * FROM session LIMIT 1").toArray() as unknown as Array<{
+      code: string;
       expiresAt: number;
       receiverToken: string;
       senderToken: string | null;
@@ -372,6 +373,11 @@ export class SignalingSessionDO extends DurableObject {
        )`,
     );
 
+    // If sender explicitly signals leave, release the sender seat for reconnects
+    if (body.type === "leave" && body.sender === "sender") {
+      this.sql.exec("UPDATE session SET senderActive = 0, senderToken = NULL WHERE code = ?", s.code);
+    }
+
     return new Response(JSON.stringify({ ok: true, id, seq }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -390,6 +396,7 @@ export class SignalingSessionDO extends DurableObject {
     }
 
     const rows = this.sql.exec("SELECT * FROM session LIMIT 1").toArray() as unknown as Array<{
+      code: string;
       expiresAt: number;
       receiverToken: string;
       senderToken: string | null;

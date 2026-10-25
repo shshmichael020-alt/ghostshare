@@ -210,6 +210,20 @@ export function SessionProvider({
   const savedSenderTokensRef = useRef<Record<string, string>>({});
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
+  const currentCodeRef = useRef<string | null>(null);
+  const currentTokenRef = useRef<string | null>(null);
+  const currentRoleRef = useRef<"creator" | "joiner" | null>(null);
+
+  useEffect(() => {
+    currentCodeRef.current = code;
+  }, [code]);
+  useEffect(() => {
+    currentTokenRef.current = sessionToken;
+  }, [sessionToken]);
+  useEffect(() => {
+    currentRoleRef.current = role;
+  }, [role]);
+
   const { toasts, push, dismiss } = useToasts();
 
   const pushToast = useCallback(
@@ -456,6 +470,15 @@ export function SessionProvider({
   // Clean Disconnect & Teardown
   // -------------------------------------------------------------
   const disconnectSession = useCallback(() => {
+    if (currentRoleRef.current === "joiner" && currentCodeRef.current && currentTokenRef.current) {
+      sendSignalMessage(currentCodeRef.current, "sender", "receiver", "leave", {}, currentTokenRef.current);
+      if (typeof window !== "undefined") {
+        try {
+          window.sessionStorage.removeItem(`gs_sender_${currentCodeRef.current}`);
+        } catch {}
+      }
+    }
+
     if (connectTimeoutRef.current) {
       clearTimeout(connectTimeoutRef.current);
       connectTimeoutRef.current = null;
@@ -651,7 +674,10 @@ export function SessionProvider({
         }, 1000);
 
         // Start polling signaling server for offers and candidates
+        let isPolling = false;
         pollIntervalRef.current = setInterval(async () => {
+          if (isPolling) return;
+          isPolling = true;
           try {
             const pollRes = await fetchSignalMessages(
               currentCode,
@@ -675,13 +701,15 @@ export function SessionProvider({
                 const offer = item.data as RTCSessionDescriptionInit;
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                // Drain pending candidates only after answer is set and connection is stable
                 for (const cand of pendingCandidatesRef.current) {
                   await safeAddCandidate(pc, cand);
                 }
                 pendingCandidatesRef.current = [];
 
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
                 await waitForIceGathering(pc, 600);
 
                 const finalAnswer = pc.localDescription
@@ -699,16 +727,21 @@ export function SessionProvider({
               } else if (item.type === "candidate-batch") {
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
-                  if (pc.remoteDescription) {
+                  if (pc.remoteDescription && pc.signalingState === "stable") {
                     await safeAddCandidate(pc, cand);
                   } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
                   }
                 }
+              } else if (item.type === "leave") {
+                setConnStatus("awaiting");
+                pushToast("Peer detached from session", "default");
               }
             }
           } catch (pollErr) {
             console.warn("Receiver signaling poll warning:", pollErr);
+          } finally {
+            isPolling = false;
           }
         }, 600);
 
@@ -758,7 +791,10 @@ export function SessionProvider({
         }
 
         // 2. Join session and obtain authorized sender token
-        const existingToken = savedSenderTokensRef.current[codeToJoin];
+        const savedSessionKey = `gs_sender_${codeToJoin}`;
+        const storedToken =
+          typeof window !== "undefined" ? window.sessionStorage.getItem(savedSessionKey) : null;
+        const existingToken = savedSenderTokensRef.current[codeToJoin] || storedToken || undefined;
         const joinRes = await fetch(`/api/signal/session/${codeToJoin}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -776,6 +812,11 @@ export function SessionProvider({
         const currentToken = joinData.senderToken || existingToken || null;
         if (currentToken) {
           savedSenderTokensRef.current[codeToJoin] = currentToken;
+          if (typeof window !== "undefined") {
+            try {
+              window.sessionStorage.setItem(savedSessionKey, currentToken);
+            } catch {}
+          }
         }
 
         setCode(codeToJoin);
@@ -905,7 +946,10 @@ export function SessionProvider({
         }, 35000);
 
         // Polling loop
+        let isPolling = false;
         pollIntervalRef.current = setInterval(async () => {
+          if (isPolling) return;
+          isPolling = true;
           try {
             const pollRes = await fetchSignalMessages(
               codeToJoin,
@@ -931,7 +975,7 @@ export function SessionProvider({
               } else if (item.type === "candidate-batch") {
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
-                  if (pc.remoteDescription) {
+                  if (pc.remoteDescription && pc.signalingState === "stable") {
                     await safeAddCandidate(pc, cand);
                   } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
@@ -941,6 +985,8 @@ export function SessionProvider({
             }
           } catch (pollErr) {
             console.warn("Sender signaling poll error:", pollErr);
+          } finally {
+            isPolling = false;
           }
         }, 600);
 

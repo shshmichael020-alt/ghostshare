@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 import { formatSize } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinInput from "./PinInput";
@@ -48,6 +48,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasAutoJoinedRef = useRef(false);
 
   const isConnecting = checking || connStatus === "connecting" || connStatus === "reconnecting";
 
@@ -65,6 +66,17 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     },
     [checking, connStatus, joinGuestSession, sessionError],
   );
+
+  useEffect(() => {
+    if (hasAutoJoinedRef.current) return;
+    if (initialCode && initialCode.length === 8 && connStatus === "idle") {
+      hasAutoJoinedRef.current = true;
+      const timer = setTimeout(() => {
+        connectToReceiver(initialCode);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [initialCode, connStatus, connectToReceiver]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */

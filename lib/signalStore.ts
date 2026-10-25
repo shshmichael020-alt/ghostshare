@@ -598,6 +598,10 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
             };
             s.messages.push(msg);
             if (s.messages.length > 150) s.messages.shift();
+            if (body.type === "leave" && body.sender === "sender") {
+              s.senderActive = false;
+              s.senderToken = null;
+            }
             return new Response(JSON.stringify({ ok: true, id: msg.id, seq }), { status: 200 });
           }
 

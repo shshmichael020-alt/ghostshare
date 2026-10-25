@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { formatSize, formatCountdown } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinDisplay from "./PinDisplay";
@@ -30,7 +30,7 @@ import {
   Layers,
 } from "lucide-react";
 
-export default function DualPanel() {
+export default function DualPanel({ initialCode }: { initialCode?: string } = {}) {
   const {
     role,
     code,
@@ -63,12 +63,24 @@ export default function DualPanel() {
     pushToast,
   } = useGhostSession();
 
-  const [inputCode, setInputCode] = useState("");
+  const [inputCode, setInputCode] = useState(initialCode ?? "");
   const [isJoining, setIsJoining] = useState(false);
   const [isStartingHost, setIsStartingHost] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasAutoJoinedRef = useRef(false);
+
+  useEffect(() => {
+    if (hasAutoJoinedRef.current) return;
+    if (initialCode && initialCode.length === 8 && connStatus === "idle") {
+      hasAutoJoinedRef.current = true;
+      const timer = setTimeout(() => {
+        joinGuestSession(initialCode);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [initialCode, connStatus, joinGuestSession]);
 
   // Drag and drop handlers
   const handleDragOver = (e: React.DragEvent) => {

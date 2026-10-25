@@ -1,5 +1,5 @@
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-  // High-performance Anycast public STUN endpoints
+  // High-performance Anycast public STUN endpoints with verified low latency worldwide
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -12,7 +12,6 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     urls: [
       "turn:relay.metered.ca:80",
       "turn:relay.metered.ca:443",
-      "turn:staticauth.openrelay.metered.ca:3478",
     ],
     username: "openrelayproject",
     credential: "openrelayproject",
