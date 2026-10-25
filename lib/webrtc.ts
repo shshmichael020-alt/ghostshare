@@ -1,4 +1,5 @@
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  // High-performance public STUN endpoints
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
@@ -6,6 +7,17 @@ export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun4.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
   { urls: "stun:global.stun.twilio.com:3478" },
+  // OpenRelay TURN servers for Symmetric NAT & Mobile Carrier (CGNAT) traversal
+  {
+    urls: [
+      "stun:openrelay.metered.ca:80",
+      "turn:openrelay.metered.ca:80",
+      "turn:openrelay.metered.ca:443",
+      "turn:openrelay.metered.ca:443?transport=tcp",
+    ],
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
 ];
 
 /**
@@ -133,12 +145,25 @@ export function decodeBinaryFrame(
 }
 
 /**
- * Creates an RTCPeerConnection with public STUN servers and standard SCTP configuration.
+ * Validates that an ICE candidate object contains a non-empty candidate string.
+ * Prevents mobile WebRTC crashes caused by processing empty end-of-candidate markers.
+ */
+export function isValidIceCandidateInit(cand: unknown): cand is RTCIceCandidateInit {
+  if (!cand || typeof cand !== "object") return false;
+  const c = cand as Record<string, unknown>;
+  return typeof c.candidate === "string" && c.candidate.trim().length > 0;
+}
+
+/**
+ * Creates an RTCPeerConnection configured for robust mobile, desktop, and cross-NAT traversal.
+ * Enforces max-bundle to multiplex all channels on a single socket, preventing mobile OS drops.
  */
 export function createPeerConnection(customIceServers?: RTCIceServer[]): RTCPeerConnection {
   const config: RTCConfiguration = {
     iceServers: customIceServers && customIceServers.length > 0 ? customIceServers : DEFAULT_ICE_SERVERS,
-    iceCandidatePoolSize: 4,
+    iceTransportPolicy: "all",
+    bundlePolicy: "max-bundle",
+    iceCandidatePoolSize: 2,
   };
   return new RTCPeerConnection(config);
 }

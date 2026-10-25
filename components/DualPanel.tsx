@@ -256,6 +256,36 @@ export default function DualPanel() {
     );
   }
 
+  // Render Joiner Connecting State
+  if ((connStatus === "connecting" || connStatus === "reconnecting") && role === "joiner") {
+    return (
+      <div className="w-full max-w-md mx-auto space-y-6 animate-in fade-in duration-300">
+        <div className="p-6 sm:p-8 rounded-3xl bg-surface-container-low border border-white/[0.08] shadow-xl text-center space-y-6">
+          <div className="w-16 h-16 rounded-2xl bg-secondary/15 border border-secondary/25 flex items-center justify-center mx-auto text-secondary">
+            <Loader2 size={32} className="animate-spin" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="font-headline-lg text-xl sm:text-2xl font-bold text-on-surface">
+              {connStatus === "reconnecting" ? "Reconnecting to Peer..." : "Connecting to Peer..."}
+            </h2>
+            <p className="text-xs text-on-surface-variant max-w-sm mx-auto">
+              Negotiating direct WebRTC tunnel for session{" "}
+              <span className="font-mono font-bold text-on-surface">#{code}</span>. Please ensure the other device remains active.
+            </p>
+          </div>
+          <div className="pt-2">
+            <button
+              onClick={disconnectSession}
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-xs font-medium transition-colors cursor-pointer border border-white/[0.08]"
+            >
+              Cancel Connection
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Render Host Awaiting Guest Connection
   if (connStatus === "awaiting" || connStatus === "connecting" || connStatus === "reconnecting") {
     return (

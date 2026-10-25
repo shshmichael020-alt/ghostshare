@@ -20,6 +20,7 @@ import {
   triggerIceRestart,
   sendSignalMessage,
   fetchSignalMessages,
+  isValidIceCandidateInit,
 } from "@/lib/webrtc";
 import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
@@ -206,6 +207,8 @@ export function SessionProvider({
   const isConnectingRef = useRef<boolean>(false);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const hasAnsweredRef = useRef<boolean>(false);
+  const savedSenderTokensRef = useRef<Record<string, string>>({});
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const { toasts, push, dismiss } = useToasts();
 
@@ -548,6 +551,15 @@ export function SessionProvider({
         let candDebounceTimer: ReturnType<typeof setTimeout> | null = null;
         const outgoingCandidates: RTCIceCandidateInit[] = [];
 
+        const safeAddCandidate = async (targetPc: RTCPeerConnection, cand: RTCIceCandidateInit) => {
+          if (!isValidIceCandidateInit(cand)) return;
+          try {
+            await targetPc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (err) {
+            console.warn("Non-fatal ICE candidate insertion:", err);
+          }
+        };
+
         const flushCandidates = () => {
           if (outgoingCandidates.length > 0) {
             const batch = [...outgoingCandidates];
@@ -557,30 +569,52 @@ export function SessionProvider({
         };
 
         pc.onicecandidate = (event) => {
-          if (event.candidate) {
+          if (isValidIceCandidateInit(event.candidate)) {
             outgoingCandidates.push(event.candidate.toJSON());
             if (candDebounceTimer) clearTimeout(candDebounceTimer);
-            candDebounceTimer = setTimeout(flushCandidates, 200);
-          } else {
+            candDebounceTimer = setTimeout(flushCandidates, 150);
+          } else if (!event.candidate) {
             if (candDebounceTimer) clearTimeout(candDebounceTimer);
             flushCandidates();
           }
         };
 
-        pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        let iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
+        const updateConnState = () => {
+          const iceState = pc.iceConnectionState;
+          const connState = pc.connectionState;
+
+          if (iceState === "connected" || iceState === "completed" || connState === "connected") {
+            if (iceDisconnectTimer) {
+              clearTimeout(iceDisconnectTimer);
+              iceDisconnectTimer = null;
+            }
             setConnStatus("connected");
             setNatWarning(null);
-          } else if (pc.iceConnectionState === "disconnected") {
-            setConnStatus("reconnecting");
-            triggerIceRestart(pc, currentCode, "receiver", "sender", currentToken || undefined);
-          } else if (pc.iceConnectionState === "failed") {
+            setError(null);
+          } else if (iceState === "disconnected") {
+            // Grace period: transient mobile carrier latency
+            if (!iceDisconnectTimer) {
+              iceDisconnectTimer = setTimeout(() => {
+                if (pc.iceConnectionState === "disconnected") {
+                  setConnStatus("reconnecting");
+                }
+              }, 4000);
+            }
+          } else if (iceState === "failed" || connState === "failed") {
+            if (iceDisconnectTimer) {
+              clearTimeout(iceDisconnectTimer);
+              iceDisconnectTimer = null;
+            }
             setConnStatus("failed");
             setNatWarning(
               "Direct P2P UDP tunnel could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
             );
           }
         };
+
+        pc.oniceconnectionstatechange = updateConnState;
+        pc.onconnectionstatechange = updateConnState;
 
         // Incoming data channels created by joining peer
         pc.ondatachannel = (event) => {
@@ -629,14 +663,18 @@ export function SessionProvider({
             }
 
             for (const item of pollRes.messages) {
-              if (item.type === "offer" && !hasAnsweredRef.current) {
+              if (item.type === "offer") {
+                if (pc.signalingState !== "stable") {
+                  console.warn("Skipping offer due to signalingState:", pc.signalingState);
+                  continue;
+                }
                 hasAnsweredRef.current = true;
                 setConnStatus("connecting");
                 const offer = item.data as RTCSessionDescriptionInit;
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
                 for (const cand of pendingCandidatesRef.current) {
-                  await pc.addIceCandidate(new RTCIceCandidate(cand));
+                  await safeAddCandidate(pc, cand);
                 }
                 pendingCandidatesRef.current = [];
 
@@ -660,8 +698,8 @@ export function SessionProvider({
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
                   if (pc.remoteDescription) {
-                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
-                  } else {
+                    await safeAddCandidate(pc, cand);
+                  } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
                   }
                 }
@@ -718,10 +756,11 @@ export function SessionProvider({
         }
 
         // 2. Join session and obtain authorized sender token
+        const existingToken = savedSenderTokensRef.current[codeToJoin];
         const joinRes = await fetch(`/api/signal/session/${codeToJoin}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify(existingToken ? { senderToken: existingToken } : {}),
         });
 
         if (!joinRes.ok) {
@@ -732,7 +771,10 @@ export function SessionProvider({
         }
 
         const joinData = (await joinRes.json()) as { ok: boolean; senderToken?: string };
-        const currentToken = joinData.senderToken || null;
+        const currentToken = joinData.senderToken || existingToken || null;
+        if (currentToken) {
+          savedSenderTokensRef.current[codeToJoin] = currentToken;
+        }
 
         setCode(codeToJoin);
         setSessionToken(currentToken);
@@ -743,6 +785,15 @@ export function SessionProvider({
         // 3. Create PeerConnection & Separate Data Channels
         const pc = createPeerConnection();
         pcRef.current = pc;
+
+        const safeAddCandidate = async (targetPc: RTCPeerConnection, cand: RTCIceCandidateInit) => {
+          if (!isValidIceCandidateInit(cand)) return;
+          try {
+            await targetPc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (err) {
+            console.warn("Non-fatal ICE candidate insertion:", err);
+          }
+        };
 
         // A. Control channel (ordered, reliable: JSON signals & live chat)
         const ctrl = pc.createDataChannel(DATA_CHANNEL_LABELS.CONTROL, { ordered: true });
@@ -772,30 +823,53 @@ export function SessionProvider({
         };
 
         pc.onicecandidate = (event) => {
-          if (event.candidate) {
+          if (isValidIceCandidateInit(event.candidate)) {
             outgoingCandidates.push(event.candidate.toJSON());
             if (candDebounceTimer) clearTimeout(candDebounceTimer);
-            candDebounceTimer = setTimeout(flushCandidates, 200);
-          } else {
+            candDebounceTimer = setTimeout(flushCandidates, 150);
+          } else if (!event.candidate) {
             if (candDebounceTimer) clearTimeout(candDebounceTimer);
             flushCandidates();
           }
         };
 
-        pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        let iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
+        const updateConnState = () => {
+          const iceState = pc.iceConnectionState;
+          const connState = pc.connectionState;
+
+          if (iceState === "connected" || iceState === "completed" || connState === "connected") {
+            if (iceDisconnectTimer) {
+              clearTimeout(iceDisconnectTimer);
+              iceDisconnectTimer = null;
+            }
             setConnStatus("connected");
             setNatWarning(null);
-          } else if (pc.iceConnectionState === "disconnected") {
-            setConnStatus("reconnecting");
-            triggerIceRestart(pc, codeToJoin, "sender", "receiver", currentToken || undefined);
-          } else if (pc.iceConnectionState === "failed") {
-            setConnStatus("disconnected");
+            setError(null);
+          } else if (iceState === "disconnected") {
+            // Grace period: transient mobile carrier latency
+            if (!iceDisconnectTimer) {
+              iceDisconnectTimer = setTimeout(() => {
+                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc) {
+                  setConnStatus("reconnecting");
+                  triggerIceRestart(pc, codeToJoin, "sender", "receiver", currentToken || undefined);
+                }
+              }, 4000);
+            }
+          } else if (iceState === "failed" || connState === "failed") {
+            if (iceDisconnectTimer) {
+              clearTimeout(iceDisconnectTimer);
+              iceDisconnectTimer = null;
+            }
+            setConnStatus("failed");
             setNatWarning(
-              "Direct P2P UDP connection could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
+              "Direct P2P UDP tunnel could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
             );
           }
         };
+
+        pc.oniceconnectionstatechange = updateConnState;
+        pc.onconnectionstatechange = updateConnState;
 
         // 4. Create and send offer
         const offer = await pc.createOffer();
@@ -843,10 +917,10 @@ export function SessionProvider({
             for (const item of pollRes.messages) {
               if (item.type === "answer") {
                 const answer = item.data as RTCSessionDescriptionInit;
-                if (!pc.remoteDescription) {
+                if (pc.signalingState === "have-local-offer") {
                   await pc.setRemoteDescription(new RTCSessionDescription(answer));
                   for (const cand of pendingCandidatesRef.current) {
-                    await pc.addIceCandidate(new RTCIceCandidate(cand));
+                    await safeAddCandidate(pc, cand);
                   }
                   pendingCandidatesRef.current = [];
                 }
@@ -854,8 +928,8 @@ export function SessionProvider({
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
                   if (pc.remoteDescription) {
-                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
-                  } else {
+                    await safeAddCandidate(pc, cand);
+                  } else if (isValidIceCandidateInit(cand)) {
                     pendingCandidatesRef.current.push(cand);
                   }
                 }
@@ -1203,6 +1277,51 @@ export function SessionProvider({
     },
     [code, sessionToken, pushToast],
   );
+
+  // Mobile Screen WakeLock: prevents mobile sleep during active peer connections
+  useEffect(() => {
+    const acquireLock = async () => {
+      if (
+        typeof navigator !== "undefined" &&
+        "wakeLock" in navigator &&
+        connStatus === "connected" &&
+        !wakeLockRef.current
+      ) {
+        try {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+        } catch {
+          // Denied or battery saver
+        }
+      }
+    };
+
+    const releaseLock = async () => {
+      if (wakeLockRef.current) {
+        try {
+          await wakeLockRef.current.release();
+        } catch {}
+        wakeLockRef.current = null;
+      }
+    };
+
+    if (connStatus === "connected") {
+      acquireLock();
+    } else {
+      releaseLock();
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && connStatus === "connected") {
+        acquireLock();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      releaseLock();
+    };
+  }, [connStatus]);
 
   return (
     <SessionContext.Provider

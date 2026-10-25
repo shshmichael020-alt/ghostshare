@@ -49,9 +49,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const isConnecting = checking || connStatus === "connecting" || connStatus === "reconnecting";
+
   const connectToReceiver = useCallback(
     async (codeToConnect: string) => {
-      if (checking || codeToConnect.length !== 8) return;
+      if (checking || connStatus === "connecting" || connStatus === "reconnecting" || codeToConnect.length !== 8) return;
       setChecking(true);
       setCodeError(null);
 
@@ -61,7 +63,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         setCodeError(sessionError || "That 8-digit code is invalid, non-existent, or expired.");
       }
     },
-    [checking, joinGuestSession, sessionError],
+    [checking, connStatus, joinGuestSession, sessionError],
   );
 
   /* ------------------------------------------------------------- */
@@ -139,7 +141,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               setCodeError(null);
             }}
             onComplete={(code) => connectToReceiver(code)}
-            disabled={checking}
+            disabled={isConnecting}
           />
 
           {(codeError || sessionError) && (
@@ -160,14 +162,20 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           <div className="flex flex-col sm:flex-row gap-3 pt-2">
             <button
               onClick={() => connectToReceiver(codeInput)}
-              disabled={codeInput.length !== 8 || checking}
+              disabled={codeInput.length !== 8 || isConnecting}
               className="flex-1 py-3 px-4 rounded-xl bg-primary text-on-primary font-body-md font-semibold hover:bg-primary-container hover:text-on-primary-container transition-all flex items-center justify-center gap-2 shadow-md active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
-              {checking ? <Loader2 size={18} className="animate-spin" /> : null}
-              <span>{checking ? "Negotiating WebRTC Bridge..." : "Connect Recipient"}</span>
+              {isConnecting ? <Loader2 size={18} className="animate-spin" /> : null}
+              <span>
+                {connStatus === "reconnecting"
+                  ? "Reconnecting WebRTC Bridge..."
+                  : isConnecting
+                  ? "Negotiating WebRTC Bridge..."
+                  : "Connect Recipient"}
+              </span>
             </button>
 
-            {checking && (
+            {isConnecting && (
               <button
                 type="button"
                 onClick={() => {

@@ -18,16 +18,31 @@ import {
   CHUNK_SIZE,
   MAX_BUFFERED_AMOUNT,
   WebRTCMessage,
+  isValidIceCandidateInit,
 } from "../lib/webrtc";
 
 test("WebRTC Constants: CHUNK_SIZE and backpressure thresholds adhere to safe SCTP limits", () => {
   assert.equal(CHUNK_SIZE, 32 * 1024, "Chunk size must be 32 KB for safe SCTP MTU traversal");
   assert.equal(MAX_BUFFERED_AMOUNT, 256 * 1024, "High water mark must be 256 KB");
-  assert.ok(DEFAULT_ICE_SERVERS.length >= 2, "Must configure multiple public STUN servers");
+  assert.ok(DEFAULT_ICE_SERVERS.length >= 2, "Must configure multiple public STUN and TURN servers");
   assert.ok(
     DEFAULT_ICE_SERVERS.some((s) => typeof s.urls === "string" && s.urls.includes("stun")),
     "ICE servers must include STUN protocol endpoints",
   );
+  assert.ok(
+    DEFAULT_ICE_SERVERS.some((s) => Array.isArray(s.urls) && s.urls.some((u) => u.includes("turn"))),
+    "ICE servers must include TURN relay endpoints for mobile CGNAT traversal",
+  );
+});
+
+test("ICE Candidate Validation: filters out empty candidates, nulls, and end-of-candidate indicators", () => {
+  assert.equal(isValidIceCandidateInit({ candidate: "candidate:1 1 UDP 2130706431 192.168.1.1 50000 typ host" }), true);
+  assert.equal(isValidIceCandidateInit({ candidate: "" }), false, "Empty string candidate must be rejected");
+  assert.equal(isValidIceCandidateInit({ candidate: "   " }), false, "Whitespace-only candidate must be rejected");
+  assert.equal(isValidIceCandidateInit(null), false, "Null candidate must be rejected");
+  assert.equal(isValidIceCandidateInit(undefined), false, "Undefined candidate must be rejected");
+  assert.equal(isValidIceCandidateInit({}), false, "Empty candidate object must be rejected");
+  assert.equal(isValidIceCandidateInit({ candidate: 12345 }), false, "Non-string candidate must be rejected");
 });
 
 test("WebRTC Protocol: serializes and parses control messages cleanly", () => {
