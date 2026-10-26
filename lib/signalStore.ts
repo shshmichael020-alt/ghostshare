@@ -1,4 +1,5 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { timingSafeEqualStr } from "./crypto";
 
 export interface SignalMessage {
   seq?: number;
@@ -525,7 +526,7 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
             } catch {}
 
             if (s.senderActive && s.senderToken) {
-              if (reconnectToken && reconnectToken === s.senderToken) {
+              if (reconnectToken && timingSafeEqualStr(reconnectToken, s.senderToken)) {
                 return new Response(JSON.stringify({ ok: true, code: s.code, senderToken: s.senderToken }), { status: 200 });
               }
               return new Response(JSON.stringify({ error: "Session already has an active sender connected" }), { status: 409 });
@@ -547,7 +548,7 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
               sessions.delete(code);
               return new Response(JSON.stringify({ error: "Expired" }), { status: 404 });
             }
-            if (!token || s.receiverToken !== token) {
+            if (!token || !timingSafeEqualStr(s.receiverToken, token)) {
               return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 403 });
             }
             s.expiresAt = s.createdAt + body.ttlSeconds * 1000;
@@ -579,10 +580,10 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
             if (!token) {
               return new Response(JSON.stringify({ error: "Unauthorized: Missing token" }), { status: 401 });
             }
-            if (body.sender === "receiver" && token !== s.receiverToken) {
+            if (body.sender === "receiver" && !timingSafeEqualStr(token, s.receiverToken)) {
               return new Response(JSON.stringify({ error: "Unauthorized: Invalid receiver token" }), { status: 403 });
             }
-            if (body.sender === "sender" && (!s.senderToken || token !== s.senderToken)) {
+            if (body.sender === "sender" && (!s.senderToken || !timingSafeEqualStr(token, s.senderToken))) {
               return new Response(JSON.stringify({ error: "Unauthorized: Invalid sender token" }), { status: 403 });
             }
 
@@ -619,10 +620,10 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
             if (!token) {
               return new Response(JSON.stringify({ error: "Unauthorized: Missing token" }), { status: 401 });
             }
-            if (target === "receiver" && token !== s.receiverToken) {
+            if (target === "receiver" && !timingSafeEqualStr(token, s.receiverToken)) {
               return new Response(JSON.stringify({ error: "Unauthorized: Invalid receiver token" }), { status: 403 });
             }
-            if (target === "sender" && (!s.senderToken || token !== s.senderToken)) {
+            if (target === "sender" && (!s.senderToken || !timingSafeEqualStr(token, s.senderToken))) {
               return new Response(JSON.stringify({ error: "Unauthorized: Invalid sender token" }), { status: 403 });
             }
 
@@ -650,7 +651,7 @@ export function createInMemoryTestNamespace(): SignalingStorageNamespace {
               sessions.delete(code);
               return new Response(JSON.stringify({ error: "Session expired" }), { status: 404 });
             }
-            if (s.receiverToken !== token.trim()) {
+            if (!timingSafeEqualStr(s.receiverToken, token.trim())) {
               return new Response(JSON.stringify({ error: "Unauthorized: Invalid receiver token" }), { status: 403 });
             }
 

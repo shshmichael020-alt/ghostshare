@@ -8,7 +8,7 @@ import {
   checkCrossIsolateRateLimit,
   SignalingStorageNamespace,
 } from "@/lib/signalStore";
-import { getClientIp } from "@/lib/rateLimit";
+import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 import { isValidTtl } from "@/lib/constants";
 
 function getBinding(): SignalingStorageNamespace | undefined {
@@ -90,6 +90,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  const origin = request.headers.get("origin");
+  if (!isAllowedOrigin(origin, request.url)) {
+    return NextResponse.json({ error: "Forbidden: Untrusted cross-origin request" }, { status: 403 });
+  }
+
   const { code } = await params;
 
   if (!code || !/^\d{8}$/.test(code)) {
@@ -132,6 +137,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  const origin = request.headers.get("origin");
+  if (!isAllowedOrigin(origin, request.url)) {
+    return NextResponse.json({ error: "Forbidden: Untrusted cross-origin request" }, { status: 403 });
+  }
+
   const { code } = await params;
 
   if (!code || !/^\d{8}$/.test(code)) {
@@ -179,6 +189,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  const origin = request.headers.get("origin");
+  if (!isAllowedOrigin(origin, request.url)) {
+    return NextResponse.json({ error: "Forbidden: Untrusted cross-origin request" }, { status: 403 });
+  }
+
   const { code } = await params;
 
   if (!code || !/^\d{8}$/.test(code)) {

@@ -16,23 +16,58 @@ function cleanupExpired() {
   }
 }
 
+const IPV4_REGEX = /^(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+const IPV6_REGEX = /^[0-9a-fA-F:]+$/;
+
+export function isValidIp(ip: string): boolean {
+  if (!ip || typeof ip !== "string" || ip.length > 45) return false;
+  return IPV4_REGEX.test(ip) || (ip.includes(":") && IPV6_REGEX.test(ip));
+}
+
 /**
  * Extracts client IP from Cloudflare or standard proxy headers.
+ * Cloudflare Workers overwrite cf-connecting-ip at edge with the verified client IP.
  */
 export function getClientIp(request: Request): string {
   const cfIp = request.headers.get("cf-connecting-ip");
-  if (cfIp) return cfIp.trim();
+  if (cfIp) {
+    const trimmed = cfIp.trim();
+    if (isValidIp(trimmed)) return trimmed;
+  }
 
   const forwarded = request.headers.get("x-forwarded-for");
   if (forwarded) {
     const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
+    if (first && isValidIp(first)) return first;
   }
 
   const realIp = request.headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
+  if (realIp) {
+    const trimmed = realIp.trim();
+    if (isValidIp(trimmed)) return trimmed;
+  }
 
   return "127.0.0.1";
+}
+
+/**
+ * Validates origin header against allowed production and local origins.
+ * Blocks malicious cross-origin requests.
+ */
+export function isAllowedOrigin(origin: string | null, requestUrl: URL | string): boolean {
+  if (!origin) return true;
+  try {
+    const reqOrigin = typeof requestUrl === "string" ? new URL(requestUrl).origin : requestUrl.origin;
+    if (origin === reqOrigin) return true;
+  } catch {}
+  const allowed = [
+    "https://ghostshare.shshmichael020.workers.dev",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8787",
+    "http://127.0.0.1:8787",
+  ];
+  return allowed.includes(origin);
 }
 
 /**

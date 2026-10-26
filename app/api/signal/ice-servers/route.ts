@@ -26,12 +26,10 @@ export async function GET() {
   }
 
   let env: Record<string, string | undefined> = {};
-  let envKeys: string[] = [];
   try {
     const ctx = getCloudflareContext();
     if (ctx?.env) {
       env = ctx.env as Record<string, string | undefined>;
-      envKeys = Object.keys(ctx.env);
     }
   } catch {}
 
@@ -77,7 +75,6 @@ export async function GET() {
     }
   }
 
-  let parseError: string | null = null;
   // Option 2: Custom JSON servers provided via Cloudflare Worker secret
   if (turnServersJson) {
     try {
@@ -93,7 +90,6 @@ export async function GET() {
         });
       }
     } catch (err: unknown) {
-      parseError = String(err);
       console.warn("Failed to parse TURN_SERVERS_JSON:", err);
     }
   }

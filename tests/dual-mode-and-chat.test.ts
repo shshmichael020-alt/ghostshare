@@ -19,7 +19,7 @@ test("Binary Framing: encode and decode frame with magic bytes and metadata", ()
   const offset = 1048576; // 1 MB offset
   const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04]);
 
-  const framed = encodeBinaryFrame(fileId, chunkIndex, offset, payload);
+  const framed = encodeBinaryFrame(fileId, chunkIndex, offset, payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
 
   assert.ok(framed.byteLength > payload.byteLength, "Framed buffer must include header overhead");
 
@@ -98,7 +98,7 @@ test("Simultaneous Bidirectional Transfer: Dual peers stream files concurrently 
   while (offsetA < fileAtoBData.length || offsetB < fileBtoAData.length) {
     if (offsetA < fileAtoBData.length) {
       const sliceA = fileAtoBData.subarray(offsetA, offsetA + CHUNK_SIZE);
-      const frameA = encodeBinaryFrame(fileAtoBId, chunkIdxA++, offsetA, sliceA);
+      const frameA = encodeBinaryFrame(fileAtoBId, chunkIdxA++, offsetA, sliceA.buffer.slice(sliceA.byteOffset, sliceA.byteOffset + sliceA.byteLength));
       
       // Decoded by Peer B from files-creator-to-joiner channel
       const decodedA = decodeBinaryFrame(frameA);
@@ -110,7 +110,7 @@ test("Simultaneous Bidirectional Transfer: Dual peers stream files concurrently 
 
     if (offsetB < fileBtoAData.length) {
       const sliceB = fileBtoAData.subarray(offsetB, offsetB + CHUNK_SIZE);
-      const frameB = encodeBinaryFrame(fileBtoAId, chunkIdxB++, offsetB, sliceB);
+      const frameB = encodeBinaryFrame(fileBtoAId, chunkIdxB++, offsetB, sliceB.buffer.slice(sliceB.byteOffset, sliceB.byteOffset + sliceB.byteLength));
 
       // Decoded by Peer A from files-joiner-to-creator channel
       const decodedB = decodeBinaryFrame(frameB);
@@ -177,8 +177,9 @@ test("Ephemeral Live Chat: message formatting, timestamps, sender roles, and cha
 
       const webrtcMsg: WebRTCMessage = {
         type: "chat",
+        id: `local_msg_${Date.now()}`,
         text,
-        timestamp: now,
+        sentAt: now,
         senderRole: localRole,
       };
 
@@ -188,7 +189,7 @@ test("Ephemeral Live Chat: message formatting, timestamps, sender roles, and cha
 
     const receiveMessage = (msg: WebRTCMessage) => {
       if (msg.type !== "chat" || !msg.text) return;
-      const id = `peer_msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const id = msg.id || `peer_msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const senderRole = msg.senderRole || (localRole === "creator" ? "joiner" : "creator");
 
       state.messages.push({
@@ -196,7 +197,7 @@ test("Ephemeral Live Chat: message formatting, timestamps, sender roles, and cha
         sender: "peer",
         senderName: senderRole === "creator" ? "Host" : "Guest",
         text: msg.text,
-        timestamp: msg.timestamp || Date.now(),
+        timestamp: msg.sentAt || Date.now(),
       });
 
       if (!state.isChatOpen) {

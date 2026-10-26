@@ -6,7 +6,7 @@ import {
   SignalingStorageNamespace,
   SignalMessage,
 } from "@/lib/signalStore";
-import { getClientIp } from "@/lib/rateLimit";
+import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 
 const ALLOWED_TYPES = new Set<SignalMessage["type"]>([
   "offer",
@@ -32,6 +32,11 @@ function extractBearer(request: Request, bodyToken?: string): string | undefined
 
 export async function POST(request: Request) {
   try {
+    const origin = request.headers.get("origin");
+    if (!isAllowedOrigin(origin, request.url)) {
+      return NextResponse.json({ error: "Forbidden: Untrusted cross-origin request" }, { status: 403 });
+    }
+
     let binding: SignalingStorageNamespace | undefined;
     try {
       const ctx = getCloudflareContext();

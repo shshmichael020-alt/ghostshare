@@ -96,6 +96,63 @@ export type WebRTCMessage =
 export const BINARY_FRAME_MAGIC = 0x4753; // 'GS' ASCII identifier
 
 /**
+ * Sanitizes an untrusted filename received over WebRTC.
+ * Prevents path traversal, null byte injections, HTML injections, and unbounded lengths.
+ */
+export function sanitizeFileName(name: unknown): string {
+  if (typeof name !== "string" || !name.trim()) {
+    return "unnamed_file";
+  }
+  // Strip null bytes and replace path separators with underscores
+  let clean = name.replace(/\0/g, "").replace(/[\/\\]/g, "_").trim();
+  // Strip non-printable / control characters
+  clean = clean.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  // Limit length to safe standard 255 chars preserving extension if present
+  if (clean.length > 255) {
+    const extIdx = clean.lastIndexOf(".");
+    const ext = extIdx > -1 && extIdx > clean.length - 15 ? clean.slice(extIdx) : "";
+    clean = clean.slice(0, 255 - ext.length) + ext;
+  }
+  if (!clean || clean === "." || clean === "..") {
+    clean = "unnamed_file";
+  }
+  return clean;
+}
+
+/**
+ * Sanitizes an untrusted MIME type received over WebRTC.
+ */
+export function sanitizeMimeType(mime: unknown): string {
+  if (typeof mime !== "string" || !mime.trim()) {
+    return "application/octet-stream";
+  }
+  const clean = mime.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9!#$&^_.+-]{0,126}$/.test(clean)) {
+    return "application/octet-stream";
+  }
+  return clean;
+}
+
+/**
+ * Sanitizes an untrusted File or Batch ID.
+ */
+export function sanitizeFileId(id: unknown): string {
+  if (typeof id !== "string" || !id.trim()) {
+    return `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
+/**
+ * Sanitizes untrusted chat text: strips control characters and limits length.
+ */
+export function sanitizeChatText(text: unknown, maxLength = 2000): string {
+  if (typeof text !== "string") return "";
+  const clean = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim();
+  return clean.slice(0, maxLength);
+}
+
+/**
  * Encodes a binary chunk with a structured framing header:
  * [0..1] Magic bytes (0x47, 0x53)
  * [2]    Version (0x01)

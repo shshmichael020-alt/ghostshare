@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { timingSafeEqualStr } from "./crypto";
 
 export interface SessionRecord {
   code: string;
@@ -224,7 +225,7 @@ export class SignalingSessionDO extends DurableObject {
 
     // If a sender is already active, reject competing sender claims unless presenting matching token
     if (s.senderActive === 1 && s.senderToken) {
-      if (reconnectToken && reconnectToken === s.senderToken) {
+      if (reconnectToken && timingSafeEqualStr(reconnectToken, s.senderToken)) {
         return new Response(
           JSON.stringify({ ok: true, code: s.code, senderToken: s.senderToken }),
           { status: 200, headers: { "Content-Type": "application/json" } },
@@ -275,7 +276,7 @@ export class SignalingSessionDO extends DurableObject {
       return new Response(JSON.stringify({ error: "Session expired" }), { status: 404 });
     }
 
-    if (s.receiverToken !== token) {
+    if (!timingSafeEqualStr(s.receiverToken, token)) {
       return new Response(JSON.stringify({ error: "Unauthorized: Invalid receiver token" }), { status: 403 });
     }
 
@@ -328,14 +329,14 @@ export class SignalingSessionDO extends DurableObject {
 
     // Authenticate sender role against assigned capability
     if (body.sender === "receiver") {
-      if (token !== s.receiverToken) {
+      if (!timingSafeEqualStr(token, s.receiverToken)) {
         return new Response(
           JSON.stringify({ error: "Unauthorized: Invalid receiver token" }),
           { status: 403, headers: { "Content-Type": "application/json" } },
         );
       }
     } else if (body.sender === "sender") {
-      if (!s.senderToken || token !== s.senderToken) {
+      if (!s.senderToken || !timingSafeEqualStr(token, s.senderToken)) {
         return new Response(
           JSON.stringify({ error: "Unauthorized: Invalid sender token" }),
           { status: 403, headers: { "Content-Type": "application/json" } },
@@ -420,14 +421,14 @@ export class SignalingSessionDO extends DurableObject {
     }
 
     if (target === "receiver") {
-      if (token !== s.receiverToken) {
+      if (!timingSafeEqualStr(token, s.receiverToken)) {
         return new Response(
           JSON.stringify({ error: "Unauthorized: Invalid receiver token" }),
           { status: 403, headers: { "Content-Type": "application/json" } },
         );
       }
     } else if (target === "sender") {
-      if (!s.senderToken || token !== s.senderToken) {
+      if (!s.senderToken || !timingSafeEqualStr(token, s.senderToken)) {
         return new Response(
           JSON.stringify({ error: "Unauthorized: Invalid sender token" }),
           { status: 403, headers: { "Content-Type": "application/json" } },
@@ -520,7 +521,7 @@ export class SignalingSessionDO extends DurableObject {
       );
     }
 
-    if (rows[0].receiverToken !== token.trim()) {
+    if (!timingSafeEqualStr(rows[0].receiverToken, token.trim())) {
       return new Response(
         JSON.stringify({ error: "Unauthorized: Invalid receiver token" }),
         { status: 403, headers: { "Content-Type": "application/json" } },

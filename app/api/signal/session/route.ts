@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateUniqueCode } from "@/lib/codes";
 import { createSignalingSession, checkCrossIsolateRateLimit, SignalingStorageNamespace } from "@/lib/signalStore";
-import { getClientIp } from "@/lib/rateLimit";
+import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 import { DEFAULT_TTL_SECONDS, isValidTtl } from "@/lib/constants";
 
 export async function POST(request: Request) {
   try {
+    const origin = request.headers.get("origin");
+    if (!isAllowedOrigin(origin, request.url)) {
+      return NextResponse.json({ error: "Forbidden: Untrusted cross-origin request" }, { status: 403 });
+    }
+
     let binding: SignalingStorageNamespace | undefined;
     try {
       const ctx = getCloudflareContext();

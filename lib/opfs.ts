@@ -59,6 +59,11 @@ export async function createIncomingFileSink(
   expectedSize: number,
   startOffset: number = 0,
 ): Promise<OpfsFileStreamer> {
+  const safeFileName = fileName.replace(/\0/g, "").replace(/[\/\\]/g, "_").trim().slice(0, 255) || "unnamed_file";
+  const safeMime = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9!#$&^_.+-]{0,126}$/i.test(mimeType.trim())
+    ? mimeType.trim().toLowerCase()
+    : "application/octet-stream";
+
   const dir = await getSessionDir(code);
   const storageKey = sanitizeStorageKey(fileId);
 
@@ -124,7 +129,7 @@ export async function createIncomingFileSink(
                 );
               }
 
-              return new File([rawFile], fileName, { type: mimeType || "application/octet-stream" });
+              return new File([rawFile], safeFileName, { type: safeMime });
             })();
             return closePromise;
           },
@@ -169,13 +174,13 @@ export async function createIncomingFileSink(
       } else {
         finalChunks = unpositionedChunks;
       }
-      const blob = new Blob(finalChunks, { type: mimeType || "application/octet-stream" });
+      const blob = new Blob(finalChunks, { type: safeMime });
       if (blob.size !== expectedSize) {
         throw new Error(
           `Transferred byte length mismatch: expected ${expectedSize} bytes, but received ${blob.size} bytes`,
         );
       }
-      return new File([blob], fileName, { type: mimeType || "application/octet-stream" });
+      return new File([blob], safeFileName, { type: safeMime });
     },
     getBytesWritten: () => bytesWritten,
   };

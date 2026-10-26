@@ -22,6 +22,10 @@ import {
   sendSignalMessage,
   fetchSignalMessages,
   isValidIceCandidateInit,
+  sanitizeFileName,
+  sanitizeMimeType,
+  sanitizeFileId,
+  sanitizeChatText,
 } from "@/lib/webrtc";
 import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
@@ -243,12 +247,14 @@ export function SessionProvider({
         const msg = JSON.parse(rawData) as WebRTCMessage;
 
         if (msg.type === "chat") {
+          const cleanText = sanitizeChatText(msg.text);
+          if (!cleanText) return;
           const chatMsg: ChatMessage = {
-            id: msg.id,
+            id: sanitizeFileId(msg.id),
             sender: "peer",
-            senderName: msg.senderName || "Peer",
-            text: msg.text.slice(0, 2000),
-            timestamp: msg.sentAt || Date.now(),
+            senderName: sanitizeChatText(msg.senderName || "Peer", 40),
+            text: cleanText,
+            timestamp: typeof msg.sentAt === "number" && Number.isFinite(msg.sentAt) ? msg.sentAt : Date.now(),
           };
           setMessages((prev) => [...prev, chatMsg]);
           setIsChatOpen((open) => {
@@ -258,11 +264,19 @@ export function SessionProvider({
             return open;
           });
         } else if (msg.type === "transfer-request") {
+          const sanitizedFiles: TransferManifestFile[] = (Array.isArray(msg.files) ? msg.files : [])
+            .map((f) => ({
+              id: sanitizeFileId(f.id),
+              name: sanitizeFileName(f.name),
+              size: typeof f.size === "number" && Number.isFinite(f.size) && f.size >= 0 ? f.size : 0,
+              type: sanitizeMimeType(f.type),
+            }))
+            .filter((f) => f.size >= 0);
           setPendingApproval({
-            batchId: msg.batchId || `batch_${Date.now()}`,
-            files: msg.files,
+            batchId: sanitizeFileId(msg.batchId || `batch_${Date.now()}`),
+            files: sanitizedFiles,
           });
-          pushToast(`Peer requested to transfer ${msg.files.length} file(s)`, "default");
+          pushToast(`Peer requested to transfer ${sanitizedFiles.length} file(s)`, "default");
         } else if (msg.type === "transfer-accept") {
           if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
             console.warn(`Ignoring transfer-accept for mismatched batch ${msg.batchId}`);
@@ -282,38 +296,43 @@ export function SessionProvider({
           );
           currentOutboundBatchIdRef.current = null;
         } else if (msg.type === "file-start") {
-          const startOffset = msg.offset ?? 0;
+          const safeId = sanitizeFileId(msg.id);
+          const safeName = sanitizeFileName(msg.name);
+          const safeMime = sanitizeMimeType(msg.mimeType);
+          const safeSize = typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size >= 0 ? msg.size : 0;
+          const startOffset = typeof msg.offset === "number" && Number.isFinite(msg.offset) && msg.offset >= 0 ? msg.offset : 0;
+
           if (startOffset === 0) {
             // Fresh transfer or retry: purge any stale chunks from previous aborted attempts
-            pendingChunksRef.current.delete(msg.id);
+            pendingChunksRef.current.delete(safeId);
           }
           try {
             const streamer = await createIncomingFileSink(
               code || "default",
-              msg.id,
-              msg.name,
-              msg.mimeType,
-              msg.size,
+              safeId,
+              safeName,
+              safeMime,
+              safeSize,
               startOffset,
             );
-            activeSinksRef.current.set(msg.id, {
+            activeSinksRef.current.set(safeId, {
               streamer,
-              meta: { id: msg.id, name: msg.name, size: msg.size, mimeType: msg.mimeType },
+              meta: { id: safeId, name: safeName, size: safeSize, mimeType: safeMime },
             });
 
             // Drain any chunks that arrived early
-            const early = pendingChunksRef.current.get(msg.id);
+            const early = pendingChunksRef.current.get(safeId);
             if (early && early.length > 0) {
               for (const c of early) {
                 await streamer.write(c.payload, c.offset);
               }
-              pendingChunksRef.current.delete(msg.id);
+              pendingChunksRef.current.delete(safeId);
             }
 
             setActiveReceiving({
-              id: msg.id,
-              name: msg.name,
-              size: msg.size,
+              id: safeId,
+              name: safeName,
+              size: safeSize,
               receivedBytes: streamer.getBytesWritten(),
               batchId: msg.batchId,
             });
@@ -321,7 +340,7 @@ export function SessionProvider({
             // Signal peer on control channel that sink is ready
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
-              ctrl.send(JSON.stringify({ type: "file-ready", id: msg.id, batchId: msg.batchId }));
+              ctrl.send(JSON.stringify({ type: "file-ready", id: safeId, batchId: msg.batchId }));
             }
           } catch (sinkErr) {
             console.error("Sink allocation error:", sinkErr);
@@ -330,13 +349,13 @@ export function SessionProvider({
               ctrl.send(
                 JSON.stringify({
                   type: "file-error",
-                  id: msg.id,
+                  id: safeId,
                   error: (sinkErr as Error).message,
                   batchId: msg.batchId,
                 }),
               );
             }
-            pushToast(`Storage error for ${msg.name}: ${(sinkErr as Error).message}`, "error");
+            pushToast(`Storage error for ${safeName}: ${(sinkErr as Error).message}`, "error");
           }
         } else if (msg.type === "file-end") {
           const active = activeSinksRef.current.get(msg.id);
