@@ -87,7 +87,7 @@ export async function createIncomingFileSink(
 
         return {
           write: async (chunk: ArrayBuffer, offset?: number) => {
-            writeChain = writeChain.then(async () => {
+            writeChain = writeChain.catch(() => {}).then(async () => {
               try {
                 if (typeof offset === "number") {
                   if (writtenOffsets.has(offset)) {
@@ -151,21 +151,26 @@ export async function createIncomingFileSink(
   const chunksByOffset = new Map<number, ArrayBuffer>();
   const unpositionedChunks: ArrayBuffer[] = [];
   let bytesWritten = startOffset;
+  let fallbackWriteChain: Promise<void> = Promise.resolve();
 
   return {
     write: async (chunk: ArrayBuffer, offset?: number) => {
-      if (typeof offset === "number") {
-        if (chunksByOffset.has(offset)) {
-          // Deduplicate chunk
-          return;
+      fallbackWriteChain = fallbackWriteChain.catch(() => {}).then(async () => {
+        if (typeof offset === "number") {
+          if (chunksByOffset.has(offset)) {
+            // Deduplicate chunk
+            return;
+          }
+          chunksByOffset.set(offset, chunk);
+        } else {
+          unpositionedChunks.push(chunk);
         }
-        chunksByOffset.set(offset, chunk);
-      } else {
-        unpositionedChunks.push(chunk);
-      }
-      bytesWritten += chunk.byteLength;
+        bytesWritten += chunk.byteLength;
+      });
+      await fallbackWriteChain;
     },
     close: async () => {
+      await fallbackWriteChain;
       let finalChunks: ArrayBuffer[];
       if (chunksByOffset.size > 0) {
         finalChunks = Array.from(chunksByOffset.entries())

@@ -379,9 +379,9 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                   ? "text-tertiary flex items-center gap-1"
                                   : item.status === "error"
                                   ? "text-error"
-                                  : item.status === "uploading"
+                                  : item.status === "uploading" || item.status === "awaiting-verification"
                                   ? "text-secondary flex items-center gap-1"
-                                  : item.status === "requesting"
+                                  : item.status === "requesting" || item.status === "accepted"
                                   ? "text-primary flex items-center gap-1"
                                   : "text-on-surface-variant"
                               }
@@ -407,6 +407,12 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                                   <Loader2 size={12} className="animate-spin" /> Streaming ({item.progress}%)
                                 </>
                               )}
+                              {item.status === "awaiting-verification" && (
+                                <>
+                                  <Loader2 size={12} className="animate-spin" /> Verifying...
+                                </>
+                              )}
+                              {item.status === "accepted" && "Accepted, preparing..."}
                               {item.status === "requesting" && "Awaiting Approval"}
                               {item.status === "idle" && "Ready to Stream"}
                             </span>

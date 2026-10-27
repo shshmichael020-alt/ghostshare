@@ -134,6 +134,40 @@ export function sanitizeMimeType(mime: unknown): string {
 }
 
 /**
+ * Generates an opaque, cryptographically secure unique transfer file or batch ID.
+ * Independent of filename or file contents. Conforms strictly to /^[a-zA-Z0-9_-]{8,64}$/.
+ */
+export function generateTransferId(): string {
+  if (typeof crypto !== "undefined") {
+    if (typeof crypto.randomUUID === "function") {
+      try {
+        return crypto.randomUUID();
+      } catch {}
+    }
+    if (typeof crypto.getRandomValues === "function") {
+      try {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 10xx
+        const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      } catch {}
+    }
+  }
+  const r = () => Math.random().toString(36).slice(2, 10);
+  return `${r()}-${r()}-${r()}-${r()}`;
+}
+
+/**
+ * Validates whether an untrusted protocol ID adheres strictly to the agreed opaque format.
+ * Rejects malformed IDs instead of silently altering them.
+ */
+export function isValidProtocolId(id: unknown): id is string {
+  return typeof id === "string" && /^[a-zA-Z0-9_-]{8,64}$/.test(id);
+}
+
+/**
  * Sanitizes an untrusted File or Batch ID.
  */
 export function sanitizeFileId(id: unknown): string {
@@ -300,28 +334,21 @@ export async function streamFileOverDataChannel(
   isCancelled: () => boolean,
   controlChannel?: RTCDataChannel,
   batchId?: string,
+  onAwaitingVerification?: () => void,
 ): Promise<void> {
   const ctrl = controlChannel || channel;
-  if (channel.readyState !== "open" || ctrl.readyState !== "open") {
-    throw new Error("Data channel is not open");
+  if (channel.readyState !== "open") {
+    throw new Error(`Outgoing data channel [${channel.label}] is not open (state: ${channel.readyState})`);
+  }
+  if (ctrl.readyState !== "open") {
+    throw new Error(`Control data channel [${ctrl.label}] is not open (state: ${ctrl.readyState})`);
   }
 
   const total = file.size;
   let offset = Math.min(startOffset, total);
 
-  // Signal start of file transmission with unique ID, batch ID, and offset on control channel
-  const startMsg: WebRTCMessage = {
-    type: "file-start",
-    id: fileId,
-    name: file.name,
-    size: file.size,
-    mimeType: file.type || "application/octet-stream",
-    offset,
-    batchId,
-  };
-  ctrl.send(JSON.stringify(startMsg));
-
-  // Await explicit receiver file-ready confirmation before sending binary data
+  // Await explicit receiver file-ready confirmation before sending binary data.
+  // Register event listeners BEFORE dispatching the file-start message to eliminate race conditions.
   await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -329,10 +356,18 @@ export async function streamFileOverDataChannel(
       if (typeof e.data === "string") {
         try {
           const m = JSON.parse(e.data) as WebRTCMessage;
-          if (m.type === "file-ready" && m.id === fileId) {
+          if (
+            m.type === "file-ready" &&
+            m.id === fileId &&
+            (!batchId || !m.batchId || m.batchId === batchId)
+          ) {
             cleanup();
             resolve();
-          } else if (m.type === "file-error" && m.id === fileId) {
+          } else if (
+            m.type === "file-error" &&
+            m.id === fileId &&
+            (!batchId || !m.batchId || m.batchId === batchId)
+          ) {
             cleanup();
             reject(new Error(`Receiver rejected file: ${m.error}`));
           }
@@ -357,7 +392,25 @@ export async function streamFileOverDataChannel(
     timer = setTimeout(() => {
       cleanup();
       reject(new Error(`Receiver readiness confirmation timed out for file ID: ${fileId}`));
-    }, 8000);
+    }, 10000);
+
+    // Signal start of file transmission with unique ID, batch ID, and offset on control channel
+    const startMsg: WebRTCMessage = {
+      type: "file-start",
+      id: fileId,
+      name: file.name,
+      size: file.size,
+      mimeType: file.type || "application/octet-stream",
+      offset,
+      batchId,
+    };
+
+    try {
+      ctrl.send(JSON.stringify(startMsg));
+    } catch (err) {
+      cleanup();
+      reject(new Error(`Failed to send file-start signal: ${(err as Error).message}`));
+    }
   });
 
   // Stream binary slices with backpressure flow control and framed metadata
@@ -368,7 +421,7 @@ export async function streamFileOverDataChannel(
     }
 
     if (channel.readyState !== "open") {
-      throw new Error("Data channel closed during file streaming");
+      throw new Error(`Data channel [${channel.label}] closed during file streaming`);
     }
 
     const end = Math.min(offset + CHUNK_SIZE, total);
@@ -402,15 +455,11 @@ export async function streamFileOverDataChannel(
     });
   }
 
-  // Signal end of file on control channel
-  const endMsg: WebRTCMessage = {
-    type: "file-end",
-    id: fileId,
-    batchId,
-  };
-  ctrl.send(JSON.stringify(endMsg));
+  // Notify sender that binary upload completed and receiver verification has begun
+  onAwaitingVerification?.();
 
-  // Await explicit completion acknowledgement from receiver after disk flush
+  // Await explicit completion acknowledgement from receiver after disk flush & size verification.
+  // Register event listeners BEFORE dispatching the file-end message to eliminate race conditions.
   await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -418,10 +467,18 @@ export async function streamFileOverDataChannel(
       if (typeof e.data === "string") {
         try {
           const m = JSON.parse(e.data) as WebRTCMessage;
-          if (m.type === "file-ack" && m.id === fileId) {
+          if (
+            m.type === "file-ack" &&
+            m.id === fileId &&
+            (!batchId || !m.batchId || m.batchId === batchId)
+          ) {
             cleanup();
             resolve();
-          } else if (m.type === "file-error" && m.id === fileId) {
+          } else if (
+            m.type === "file-error" &&
+            m.id === fileId &&
+            (!batchId || !m.batchId || m.batchId === batchId)
+          ) {
             cleanup();
             reject(new Error(`Receiver failed to persist file: ${m.error}`));
           }
@@ -447,6 +504,20 @@ export async function streamFileOverDataChannel(
       cleanup();
       reject(new Error(`Receiver file write acknowledgement timed out for file ID: ${fileId}`));
     }, 15000);
+
+    // Signal end of file on control channel
+    const endMsg: WebRTCMessage = {
+      type: "file-end",
+      id: fileId,
+      batchId,
+    };
+
+    try {
+      ctrl.send(JSON.stringify(endMsg));
+    } catch (err) {
+      cleanup();
+      reject(new Error(`Failed to send file-end signal: ${(err as Error).message}`));
+    }
   });
 }
 

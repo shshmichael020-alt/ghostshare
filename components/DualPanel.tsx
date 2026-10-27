@@ -59,7 +59,6 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     activeReceiving,
     receivedFiles,
     downloadAllFiles,
-    downloadSingleFile,
     pushToast,
   } = useGhostSession();
 
@@ -533,6 +532,14 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                       <p className="text-[10px] text-on-surface-variant font-mono-telemetry">
                         {formatSize(item.size)}
                         {item.status === "uploading" && ` • ${item.progress}%`}
+                        {item.status === "awaiting-verification" && ` • Verifying...`}
+                        {item.status === "requesting" && ` • Awaiting approval`}
+                        {item.status === "accepted" && ` • Accepted`}
+                        {item.status === "error" && item.error && (
+                          <span className="text-error truncate block mt-0.5" title={item.error}>
+                            • {item.error}
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -545,6 +552,11 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                           style={{ width: `${item.progress}%` }}
                         />
                       </div>
+                    )}
+                    {item.status === "awaiting-verification" && (
+                      <span className="text-secondary flex items-center gap-1 text-[11px] font-medium">
+                        <Loader2 size={13} className="animate-spin" /> Verifying
+                      </span>
                     )}
                     {item.status === "done" && (
                       <span className="text-tertiary flex items-center gap-1 text-[11px] font-medium">
@@ -745,13 +757,16 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => downloadSingleFile(file)}
-                    className="p-2 rounded-lg bg-surface-container-highest hover:bg-primary hover:text-on-primary text-on-surface transition-colors cursor-pointer shrink-0 shadow-sm"
-                    title="Download file"
+                  <a
+                    href={file.downloadUrl}
+                    download={file.name}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-2 rounded-lg bg-surface-container-highest hover:bg-primary hover:text-on-primary text-on-surface transition-colors cursor-pointer shrink-0 shadow-sm flex items-center justify-center"
+                    title={`Download ${file.name}`}
                   >
                     <Download size={14} />
-                  </button>
+                  </a>
                 </div>
               ))}
             </div>

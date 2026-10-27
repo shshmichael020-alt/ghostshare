@@ -26,6 +26,8 @@ import {
   sanitizeMimeType,
   sanitizeFileId,
   sanitizeChatText,
+  generateTransferId,
+  isValidProtocolId,
 } from "@/lib/webrtc";
 import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
@@ -40,7 +42,7 @@ export interface StagedItem {
   name: string;
   size: number;
   progress: number;
-  status: "idle" | "requesting" | "uploading" | "done" | "error";
+  status: "idle" | "requesting" | "accepted" | "uploading" | "awaiting-verification" | "done" | "error";
   error?: string;
   batchId?: string;
 }
@@ -188,6 +190,12 @@ export function SessionProvider({
       {
         streamer: OpfsFileStreamer;
         meta: { id: string; name: string; size: number; mimeType: string };
+        batchId?: string;
+        fileEndReceived?: boolean;
+        finalizing?: boolean;
+        expectedSize: number;
+        receivedBytes: number;
+        onChunkWritten?: () => void;
       }
     >
   >(new Map());
@@ -250,7 +258,7 @@ export function SessionProvider({
           const cleanText = sanitizeChatText(msg.text);
           if (!cleanText) return;
           const chatMsg: ChatMessage = {
-            id: sanitizeFileId(msg.id),
+            id: typeof msg.id === "string" ? msg.id : `msg_${Date.now()}`,
             sender: "peer",
             senderName: sanitizeChatText(msg.senderName || "Peer", 40),
             text: cleanText,
@@ -264,16 +272,36 @@ export function SessionProvider({
             return open;
           });
         } else if (msg.type === "transfer-request") {
-          const sanitizedFiles: TransferManifestFile[] = (Array.isArray(msg.files) ? msg.files : [])
-            .map((f) => ({
-              id: sanitizeFileId(f.id),
+          const rawFiles = Array.isArray(msg.files) ? msg.files : [];
+          const batchId = isValidProtocolId(msg.batchId) ? msg.batchId : `b_${generateTransferId()}`;
+          const sanitizedFiles: TransferManifestFile[] = [];
+
+          for (const f of rawFiles) {
+            if (!f || !isValidProtocolId(f.id)) {
+              console.warn("Rejecting transfer request with invalid protocol file ID:", f?.id);
+              const ctrl = dcControlRef.current;
+              if (ctrl && ctrl.readyState === "open") {
+                ctrl.send(
+                  JSON.stringify({
+                    type: "transfer-decline",
+                    batchId,
+                    reason: "Invalid protocol file ID format",
+                    senderRole: role || undefined,
+                  }),
+                );
+              }
+              return;
+            }
+            sanitizedFiles.push({
+              id: f.id,
               name: sanitizeFileName(f.name),
               size: typeof f.size === "number" && Number.isFinite(f.size) && f.size >= 0 ? f.size : 0,
               type: sanitizeMimeType(f.type),
-            }))
-            .filter((f) => f.size >= 0);
+            });
+          }
+
           setPendingApproval({
-            batchId: sanitizeFileId(msg.batchId || `batch_${Date.now()}`),
+            batchId,
             files: sanitizedFiles,
           });
           pushToast(`Peer requested to transfer ${sanitizedFiles.length} file(s)`, "default");
@@ -283,6 +311,9 @@ export function SessionProvider({
             return;
           }
           pushToast("Peer approved transfer! Commencing P2P stream...", "success");
+          setStagedFiles((prev) =>
+            prev.map((f) => (f.status === "requesting" ? { ...f, status: "accepted" } : f)),
+          );
           setOutboundPhase("transferring");
         } else if (msg.type === "transfer-decline") {
           if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
@@ -292,45 +323,94 @@ export function SessionProvider({
           pushToast(msg.reason ? `Transfer declined: ${msg.reason}` : "Peer declined the transfer request", "error");
           setOutboundPhase("idle");
           setStagedFiles((prev) =>
-            prev.map((f) => (f.status === "requesting" ? { ...f, status: "idle" } : f)),
+            prev.map((f) => (f.status === "requesting" || f.status === "accepted" ? { ...f, status: "idle" } : f)),
           );
           currentOutboundBatchIdRef.current = null;
         } else if (msg.type === "file-start") {
-          const safeId = sanitizeFileId(msg.id);
+          const fileId = msg.id;
+          if (!isValidProtocolId(fileId)) {
+            console.error("Invalid protocol file ID in file-start:", fileId);
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-error",
+                  id: typeof fileId === "string" ? fileId : "unknown",
+                  error: "Malformed protocol file ID",
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
+            }
+            return;
+          }
+
+          // Check if this file was already verified & completed in receivedFiles
+          const alreadyCompleted = receivedFiles.find((f) => f.id === fileId);
+          if (alreadyCompleted) {
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-ready",
+                  id: fileId,
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
+            }
+            return;
+          }
+
+          // Discard any existing active sink or pending chunks for this file ID (e.g. fresh retry attempt)
+          const existingSink = activeSinksRef.current.get(fileId);
+          if (existingSink) {
+            activeSinksRef.current.delete(fileId);
+          }
+
           const safeName = sanitizeFileName(msg.name);
           const safeMime = sanitizeMimeType(msg.mimeType);
           const safeSize = typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size >= 0 ? msg.size : 0;
           const startOffset = typeof msg.offset === "number" && Number.isFinite(msg.offset) && msg.offset >= 0 ? msg.offset : 0;
 
           if (startOffset === 0) {
-            // Fresh transfer or retry: purge any stale chunks from previous aborted attempts
-            pendingChunksRef.current.delete(safeId);
+            pendingChunksRef.current.delete(fileId);
           }
+
           try {
             const streamer = await createIncomingFileSink(
               code || "default",
-              safeId,
+              fileId,
               safeName,
               safeMime,
               safeSize,
               startOffset,
             );
-            activeSinksRef.current.set(safeId, {
+
+            const sinkEntry = {
               streamer,
-              meta: { id: safeId, name: safeName, size: safeSize, mimeType: safeMime },
-            });
+              meta: { id: fileId, name: safeName, size: safeSize, mimeType: safeMime },
+              batchId: msg.batchId,
+              fileEndReceived: false,
+              finalizing: false,
+              expectedSize: safeSize,
+              receivedBytes: streamer.getBytesWritten(),
+              onChunkWritten: undefined as (() => void) | undefined,
+            };
+            activeSinksRef.current.set(fileId, sinkEntry);
 
             // Drain any chunks that arrived early
-            const early = pendingChunksRef.current.get(safeId);
+            const early = pendingChunksRef.current.get(fileId);
             if (early && early.length > 0) {
               for (const c of early) {
                 await streamer.write(c.payload, c.offset);
               }
-              pendingChunksRef.current.delete(safeId);
+              pendingChunksRef.current.delete(fileId);
+              sinkEntry.receivedBytes = streamer.getBytesWritten();
             }
 
             setActiveReceiving({
-              id: safeId,
+              id: fileId,
               name: safeName,
               size: safeSize,
               receivedBytes: streamer.getBytesWritten(),
@@ -340,7 +420,14 @@ export function SessionProvider({
             // Signal peer on control channel that sink is ready
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
-              ctrl.send(JSON.stringify({ type: "file-ready", id: safeId, batchId: msg.batchId }));
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-ready",
+                  id: fileId,
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
             }
           } catch (sinkErr) {
             console.error("Sink allocation error:", sinkErr);
@@ -349,68 +436,139 @@ export function SessionProvider({
               ctrl.send(
                 JSON.stringify({
                   type: "file-error",
-                  id: safeId,
-                  error: (sinkErr as Error).message,
+                  id: fileId,
+                  error: (sinkErr as Error).message || "Storage allocation failed",
                   batchId: msg.batchId,
+                  senderRole: role || undefined,
                 }),
               );
             }
             pushToast(`Storage error for ${safeName}: ${(sinkErr as Error).message}`, "error");
           }
         } else if (msg.type === "file-end") {
-          const active = activeSinksRef.current.get(msg.id);
-          if (active) {
-            // Delete immediately so duplicate triggers are strictly ignored
-            activeSinksRef.current.delete(msg.id);
-            setActiveReceiving(null);
+          const fileId = msg.id;
 
-            const expectedSize = active.meta.size;
-            // Wait for any remaining in-flight chunks to arrive and be written to disk
-            let waited = 0;
-            while (active.streamer.getBytesWritten() < expectedSize && waited < 6000) {
-              await new Promise((r) => setTimeout(r, 40));
-              waited += 40;
+          // If already verified & completed (e.g. duplicate ack or re-ack), immediately send file-ack
+          const alreadyCompleted = receivedFiles.find((f) => f.id === fileId);
+          if (alreadyCompleted) {
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-ack",
+                  id: fileId,
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
             }
+            return;
+          }
 
-            try {
-              const file = await active.streamer.close();
-              const downloadUrl = URL.createObjectURL(file);
-              const completedItem: ReceivedFileItem = {
-                id: active.meta.id,
-                name: active.meta.name,
-                size: file.size,
-                downloadUrl,
-                blob: file,
-                receivedAt: Date.now(),
+          const active = activeSinksRef.current.get(fileId);
+          if (!active) {
+            console.warn(`file-end received for unknown or already completed sink: ${fileId}`);
+            return;
+          }
+
+          if (active.finalizing) {
+            return;
+          }
+          active.finalizing = true;
+          active.fileEndReceived = true;
+
+          const expectedSize = active.meta.size;
+          const startTime = Date.now();
+          const maxWaitMs = 12000;
+
+          // Bounded wait for in-flight binary chunks to arrive and finish disk writes.
+          // CRITICAL: active sink remains in activeSinksRef throughout this loop so chunks can be written!
+          while (active.streamer.getBytesWritten() < expectedSize && Date.now() - startTime < maxWaitMs) {
+            await new Promise<void>((resolve) => {
+              let resolved = false;
+              const onDone = () => {
+                if (!resolved) {
+                  resolved = true;
+                  active.onChunkWritten = undefined;
+                  resolve();
+                }
               };
+              active.onChunkWritten = onDone;
+              setTimeout(onDone, 80);
+            });
+          }
 
-              setReceivedFiles((prev) => {
-                const existing = prev.filter((f) => f.id !== active.meta.id);
-                return [...existing, completedItem];
-              });
-
-              const ctrl = dcControlRef.current;
-              if (ctrl && ctrl.readyState === "open") {
-                ctrl.send(JSON.stringify({ type: "file-ack", id: msg.id, batchId: msg.batchId }));
-              }
-              pushToast(`Received: ${active.meta.name} (Verified & Persisted)`, "success");
-            } catch (closeErr) {
-              console.error("File finalization error:", closeErr);
-              const ctrl = dcControlRef.current;
-              if (ctrl && ctrl.readyState === "open") {
-                ctrl.send(
-                  JSON.stringify({
-                    type: "file-error",
-                    id: msg.id,
-                    error: (closeErr as Error).message,
-                    batchId: msg.batchId,
-                  }),
-                );
-              }
-              pushToast(`Verification failed for ${active.meta.name}: ${(closeErr as Error).message}`, "error");
-              activeSinksRef.current.delete(msg.id);
-              setActiveReceiving(null);
+          if (active.streamer.getBytesWritten() < expectedSize) {
+            const errDesc = `Incomplete transfer: expected ${expectedSize} bytes, got ${active.streamer.getBytesWritten()} bytes`;
+            activeSinksRef.current.delete(fileId);
+            setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-error",
+                  id: fileId,
+                  error: errDesc,
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
             }
+            pushToast(`Transfer failed for ${active.meta.name}: incomplete data received`, "error");
+            return;
+          }
+
+          try {
+            const file = await active.streamer.close();
+            if (file.size !== expectedSize) {
+              throw new Error(`Size mismatch: expected ${expectedSize} bytes, but wrote ${file.size} bytes`);
+            }
+
+            const downloadUrl = URL.createObjectURL(file);
+            const completedItem: ReceivedFileItem = {
+              id: active.meta.id,
+              name: active.meta.name,
+              size: file.size,
+              downloadUrl,
+              blob: file,
+              receivedAt: Date.now(),
+            };
+
+            setReceivedFiles((prev) => {
+              const existing = prev.filter((f) => f.id !== active.meta.id);
+              return [...existing, completedItem];
+            });
+
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-ack",
+                  id: fileId,
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
+            }
+            pushToast(`Received: ${active.meta.name} (Verified & Persisted)`, "success");
+          } catch (closeErr) {
+            console.error("File finalization error:", closeErr);
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-error",
+                  id: fileId,
+                  error: (closeErr as Error).message || "Verification failed",
+                  batchId: msg.batchId,
+                  senderRole: role || undefined,
+                }),
+              );
+            }
+            pushToast(`Verification failed for ${active.meta.name}: ${(closeErr as Error).message}`, "error");
+          } finally {
+            activeSinksRef.current.delete(fileId);
+            setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
           }
         } else if (msg.type === "transfer-complete") {
           setActiveReceiving(null);
@@ -421,7 +579,7 @@ export function SessionProvider({
         console.error("Error processing control message:", err);
       }
     },
-    [code, pushToast],
+    [code, role, receivedFiles, pushToast],
   );
 
   const handleBinaryChunk = useCallback(async (data: ArrayBuffer | Blob) => {
@@ -452,9 +610,14 @@ export function SessionProvider({
       const active = activeSinksRef.current.get(targetFileId);
       if (active) {
         await active.streamer.write(payload, chunkOffset);
+        const written = active.streamer.getBytesWritten();
+        active.receivedBytes = written;
         setActiveReceiving((prev) =>
-          prev && prev.id === targetFileId ? { ...prev, receivedBytes: active.streamer.getBytesWritten() } : prev,
+          prev && prev.id === targetFileId ? { ...prev, receivedBytes: written } : prev,
         );
+        if (active.onChunkWritten) {
+          active.onChunkWritten();
+        }
       } else {
         const buffered = pendingChunksRef.current.get(targetFileId) || [];
         buffered.push({ payload, offset: chunkOffset });
@@ -1067,8 +1230,8 @@ export function SessionProvider({
       const newItems: StagedItem[] = [];
 
       for (const file of incoming) {
-        const randomSlug = Math.random().toString(36).slice(2, 8);
-        const id = `${Date.now()}-${randomSlug}-${file.name}`;
+        // Generate an opaque cryptographically secure unique ID independent of filename
+        const id = generateTransferId();
         newItems.push({
           id,
           file,
@@ -1100,6 +1263,7 @@ export function SessionProvider({
     setStagedFiles((prev) =>
       prev.map((f) => (f.id === id ? { ...f, status: "idle", error: undefined, progress: 0 } : f)),
     );
+    setOutboundPhase((prev) => (prev === "done" ? "idle" : prev));
   }, []);
 
   const triggerTransferRequest = useCallback(async () => {
@@ -1115,13 +1279,13 @@ export function SessionProvider({
       return;
     }
 
-    const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const batchId = `b_${generateTransferId()}`;
     currentOutboundBatchIdRef.current = batchId;
 
     const pendingIds = new Set(pendingItems.map((f) => f.id));
     setOutboundPhase("awaiting-approval");
     setStagedFiles((prev) =>
-      prev.map((f) => (pendingIds.has(f.id) ? { ...f, status: "requesting" } : f)),
+      prev.map((f) => (pendingIds.has(f.id) ? { ...f, status: "requesting", batchId } : f)),
     );
 
     const manifestFiles = pendingItems.map((f) => ({
@@ -1155,7 +1319,7 @@ export function SessionProvider({
 
       cancelTransferRef.current = false;
       const activeBatchId = currentOutboundBatchIdRef.current;
-      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting");
+      const pending = stagedFilesRef.current.filter((f) => f.status === "requesting" || f.status === "accepted");
       let hasErrors = false;
 
       for (const item of pending) {
@@ -1181,11 +1345,17 @@ export function SessionProvider({
             () => cancelTransferRef.current,
             ctrl,
             activeBatchId ?? undefined,
+            () => {
+              if (!isSubscribed) return;
+              setStagedFiles((prev) =>
+                prev.map((f) => (f.id === item.id ? { ...f, status: "awaiting-verification", progress: 100 } : f)),
+              );
+            },
           );
 
           if (!isSubscribed) return;
           setStagedFiles((prev) =>
-            prev.map((f) => (f.id === item.id ? { ...f, status: "done", progress: 100 } : f)),
+            prev.map((f) => (f.id === item.id ? { ...f, status: "done", progress: 100, error: undefined } : f)),
           );
           pushToast(`${item.name} transferred directly!`, "success");
         } catch (err) {
