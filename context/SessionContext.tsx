@@ -41,6 +41,7 @@ import {
   StorageCapability,
   promptUserSaveFileHandle,
   MAX_RAM_FALLBACK_BYTES,
+  cleanupSessionStorage,
 } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
@@ -869,6 +870,11 @@ export function SessionProvider({
     setMessages([]);
     setUnreadCount(0);
     setIsChatOpen(false);
+
+    const sessionCodeToClean = currentCodeRef.current;
+    if (sessionCodeToClean) {
+      cleanupSessionStorage(sessionCodeToClean).catch(() => {});
+    }
 
     setConnStatus("disconnected");
     setRole(null);

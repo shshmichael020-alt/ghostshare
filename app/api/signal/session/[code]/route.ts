@@ -11,6 +11,8 @@ import {
 import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 import { isValidTtl } from "@/lib/constants";
 
+const MAX_SESSION_PAYLOAD_BYTES = 8192; // 8 KB max payload size for session operations
+
 function getBinding(): SignalingStorageNamespace | undefined {
   try {
     const ctx = getCloudflareContext();
@@ -112,11 +114,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
   }
 
   try {
+    const bodyText = await request.text();
+    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
+      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    }
+
     let senderToken: string | undefined;
-    try {
-      const body = (await request.json()) as { senderToken?: string };
-      senderToken = body?.senderToken;
-    } catch {}
+    if (bodyText.trim().length > 0) {
+      try {
+        const body = JSON.parse(bodyText) as { senderToken?: string };
+        senderToken = body?.senderToken;
+      } catch {
+        return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
+      }
+    }
 
     const result = await joinSignalingSession(code, senderToken, binding);
     if (!result.ok) {
@@ -149,7 +160,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
   }
 
   try {
-    const body = (await request.json()) as { ttlSeconds?: unknown; receiverToken?: string };
+    const bodyText = await request.text();
+    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
+      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    }
+
+    let body: { ttlSeconds?: unknown; receiverToken?: string };
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
+    }
+
     const { ttlSeconds } = body;
     const token = extractBearer(request, body.receiverToken);
 
@@ -201,11 +223,20 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ c
   }
 
   try {
+    const bodyText = await request.text();
+    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
+      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    }
+
     let bodyToken: string | undefined;
-    try {
-      const body = (await request.json()) as { receiverToken?: string };
-      bodyToken = body?.receiverToken;
-    } catch {}
+    if (bodyText.trim().length > 0) {
+      try {
+        const body = JSON.parse(bodyText) as { receiverToken?: string };
+        bodyToken = body?.receiverToken;
+      } catch {
+        return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
+      }
+    }
 
     const token = extractBearer(request, bodyToken);
 

@@ -5,6 +5,8 @@ import { createSignalingSession, checkCrossIsolateRateLimit, SignalingStorageNam
 import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 import { DEFAULT_TTL_SECONDS, isValidTtl } from "@/lib/constants";
 
+const MAX_SESSION_PAYLOAD_BYTES = 8192; // 8 KB max payload size for session operations
+
 export async function POST(request: Request) {
   try {
     const origin = request.headers.get("origin");
@@ -27,20 +29,27 @@ export async function POST(request: Request) {
       );
     }
 
+    const bodyText = await request.text();
+    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
+      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    }
+
     let ttlSeconds = DEFAULT_TTL_SECONDS;
-    try {
-      const body = (await request.json()) as { ttlSeconds?: unknown };
-      if (body && typeof body.ttlSeconds !== "undefined") {
-        if (!isValidTtl(body.ttlSeconds)) {
-          return NextResponse.json(
-            { error: "Invalid ttlSeconds. Must be a supported duration option." },
-            { status: 400 },
-          );
+    if (bodyText.trim().length > 0) {
+      try {
+        const body = JSON.parse(bodyText) as { ttlSeconds?: unknown };
+        if (body && typeof body.ttlSeconds !== "undefined") {
+          if (!isValidTtl(body.ttlSeconds)) {
+            return NextResponse.json(
+              { error: "Invalid ttlSeconds. Must be a supported duration option." },
+              { status: 400 },
+            );
+          }
+          ttlSeconds = body.ttlSeconds;
         }
-        ttlSeconds = body.ttlSeconds;
+      } catch {
+        return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
       }
-    } catch {
-      // Empty or non-JSON body: proceed with default TTL
     }
 
     const code = await generateUniqueCode(binding);
