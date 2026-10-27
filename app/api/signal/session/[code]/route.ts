@@ -10,8 +10,7 @@ import {
 } from "@/lib/signalStore";
 import { getClientIp, isAllowedOrigin } from "@/lib/rateLimit";
 import { isValidTtl } from "@/lib/constants";
-
-const MAX_SESSION_PAYLOAD_BYTES = 8192; // 8 KB max payload size for session operations
+import { readBoundedJson, MAX_SESSION_PAYLOAD_BYTES, safeErrorResponse } from "@/lib/requestBody";
 
 function getBinding(): SignalingStorageNamespace | undefined {
   try {
@@ -83,11 +82,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
       },
     );
   } catch (err) {
-    console.error("Session lookup error:", err);
-    return NextResponse.json(
-      { error: "Failed to query authoritative session store", details: (err as Error).message },
-      { status: 503 },
-    );
+    return safeErrorResponse("Failed to query authoritative session store", 503, "session_lookup", err);
   }
 }
 
@@ -114,21 +109,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
   }
 
   try {
-    const bodyText = await request.text();
-    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
-      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    const bodyResult = await readBoundedJson<{ senderToken?: string }>(request, MAX_SESSION_PAYLOAD_BYTES);
+    if (!bodyResult.ok) {
+      return NextResponse.json({ error: bodyResult.error }, { status: bodyResult.status });
     }
 
-    let senderToken: string | undefined;
-    if (bodyText.trim().length > 0) {
-      try {
-        const body = JSON.parse(bodyText) as { senderToken?: string };
-        senderToken = body?.senderToken;
-      } catch {
-        return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
-      }
-    }
-
+    const senderToken = bodyResult.data?.senderToken;
     const result = await joinSignalingSession(code, senderToken, binding);
     if (!result.ok) {
       return NextResponse.json(
@@ -139,11 +125,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cod
 
     return NextResponse.json({ ok: true, code, senderToken: result.senderToken });
   } catch (err) {
-    console.error("Session join error:", err);
-    return NextResponse.json(
-      { error: "Failed to join session", details: (err as Error).message },
-      { status: 503 },
-    );
+    return safeErrorResponse("Failed to join session", 503, "session_join", err);
   }
 }
 
@@ -160,20 +142,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
   }
 
   try {
-    const bodyText = await request.text();
-    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
-      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    const bodyResult = await readBoundedJson<{ ttlSeconds?: unknown; receiverToken?: string }>(
+      request,
+      MAX_SESSION_PAYLOAD_BYTES,
+    );
+    if (!bodyResult.ok) {
+      return NextResponse.json({ error: bodyResult.error }, { status: bodyResult.status });
     }
-
-    let body: { ttlSeconds?: unknown; receiverToken?: string };
-    try {
-      body = JSON.parse(bodyText);
-    } catch {
+    if (!bodyResult.data) {
       return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
     }
 
-    const { ttlSeconds } = body;
-    const token = extractBearer(request, body.receiverToken);
+    const { ttlSeconds } = bodyResult.data;
+    const token = extractBearer(request, bodyResult.data.receiverToken);
 
     if (!isValidTtl(ttlSeconds)) {
       return NextResponse.json(
@@ -201,12 +182,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
       remainingSeconds: result.remainingSeconds,
     });
   } catch (err) {
-    const msg = (err as Error).message;
+    const msg = (err as Error)?.message || "";
     if (msg.includes("Unauthorized")) {
       return NextResponse.json({ error: "Unauthorized: Invalid receiver token" }, { status: 403 });
     }
-    console.error("Failed to update TTL:", err);
-    return NextResponse.json({ error: "Failed to update TTL", details: msg }, { status: 500 });
+    return safeErrorResponse("Failed to update session TTL", 500, "session_patch", err);
   }
 }
 
@@ -223,22 +203,12 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ c
   }
 
   try {
-    const bodyText = await request.text();
-    if (bodyText.length > MAX_SESSION_PAYLOAD_BYTES) {
-      return NextResponse.json({ error: "Payload exceeds maximum allowed session payload size" }, { status: 413 });
+    const bodyResult = await readBoundedJson<{ receiverToken?: string }>(request, MAX_SESSION_PAYLOAD_BYTES);
+    if (!bodyResult.ok) {
+      return NextResponse.json({ error: bodyResult.error }, { status: bodyResult.status });
     }
 
-    let bodyToken: string | undefined;
-    if (bodyText.trim().length > 0) {
-      try {
-        const body = JSON.parse(bodyText) as { receiverToken?: string };
-        bodyToken = body?.receiverToken;
-      } catch {
-        return NextResponse.json({ error: "Invalid JSON format" }, { status: 400 });
-      }
-    }
-
-    const token = extractBearer(request, bodyToken);
+    const token = extractBearer(request, bodyResult.data?.receiverToken);
 
     // Enforce required receiver capability token
     if (!token) {
@@ -260,9 +230,6 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ c
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json(
-      { error: "Failed to close session", details: (err as Error).message },
-      { status: 500 },
-    );
+    return safeErrorResponse("Failed to close session", 500, "session_close", err);
   }
 }

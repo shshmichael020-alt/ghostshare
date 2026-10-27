@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Lint, Test & Build Verification
+    name: Lint, Audit, Test & Build Verification
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -34,6 +34,18 @@ jobs:
 
       - name: Install dependencies (clean install)
         run: npm ci
+
+      - name: Run Dependency Audit
+        run: npm audit --audit-level=high
+
+      - name: Secret Scanning Guard
+        run: |
+          echo "Scanning tracked files for accidentally committed credentials or private keys..."
+          if git grep -E -I -i "BEGIN (RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY" -- ':!.env*' ':!tests/*'; then
+            echo "::error::Private key material detected in repository!"
+            exit 1
+          fi
+          echo "Secret scanning guard passed: zero exposed private keys detected."
 
       - name: Run ESLint
         run: npm run lint

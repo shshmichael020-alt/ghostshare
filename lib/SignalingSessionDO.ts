@@ -108,8 +108,9 @@ export class SignalingSessionDO extends DurableObject {
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
+      console.error("Durable Object internal exception:", (err as Error)?.name);
       return new Response(
-        JSON.stringify({ error: "Durable Object internal error", details: (err as Error).message }),
+        JSON.stringify({ error: "Durable Object internal error" }),
         { status: 500, headers: { "Content-Type": "application/json" } },
       );
     }

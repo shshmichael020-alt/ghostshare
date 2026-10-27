@@ -6,6 +6,7 @@ import {
   SignalingStorageNamespace,
 } from "@/lib/signalStore";
 import { getClientIp } from "@/lib/rateLimit";
+import { safeErrorResponse } from "@/lib/requestBody";
 
 function extractBearer(request: Request, queryToken?: string | null): string | undefined {
   if (queryToken && typeof queryToken === "string" && queryToken.trim().length > 0) {
@@ -71,10 +72,6 @@ export async function GET(request: Request) {
       },
     );
   } catch (err) {
-    console.error("Signal poll error:", err);
-    return NextResponse.json(
-      { error: "Failed to poll signal messages", details: (err as Error).message },
-      { status: 503 },
-    );
+    return safeErrorResponse("Failed to poll signal messages", 503, "signal_poll", err);
   }
 }
