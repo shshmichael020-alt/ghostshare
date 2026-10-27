@@ -6,9 +6,27 @@ import {
   parseAndValidateTurnServersJson,
 } from "@/lib/iceConfig";
 
-// In-memory cache for dynamic ICE server credentials
-let cachedIceServers: RTCIceServer[] | null = null;
-let cacheExpiresAt = 0;
+export interface CachedIceConfig {
+  iceServers: RTCIceServer[];
+  turnConfigured: boolean;
+  source: string;
+  expiresAt: number;
+}
+
+// In-memory cache for validated ICE configuration
+let cachedConfig: CachedIceConfig | null = null;
+
+export function getCachedIceConfig(): CachedIceConfig | null {
+  return cachedConfig;
+}
+
+export function setCachedIceConfig(config: CachedIceConfig | null): void {
+  cachedConfig = config;
+}
+
+export function clearIceConfigCache(): void {
+  cachedConfig = null;
+}
 
 const NO_CACHE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -18,12 +36,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const now = Date.now();
-  if (cachedIceServers && now < cacheExpiresAt) {
+  if (cachedConfig && now < cachedConfig.expiresAt) {
     return NextResponse.json(
       {
-        iceServers: cachedIceServers,
-        turnConfigured: true,
-        source: "cached",
+        iceServers: cachedConfig.iceServers,
+        turnConfigured: cachedConfig.turnConfigured,
+        source: cachedConfig.source,
       },
       { headers: NO_CACHE_HEADERS },
     );
@@ -76,14 +94,19 @@ export async function GET() {
           const { iceServers: sanitized, hasAuthenticatedTurn } =
             sanitizeIceServers(data.iceServers);
 
-          if (hasAuthenticatedTurn && sanitized.length > 0) {
-            cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitized];
-            cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours
+          if (sanitized.length > 0) {
+            const combined = [...DEFAULT_STUN_SERVERS, ...sanitized];
+            cachedConfig = {
+              iceServers: combined,
+              turnConfigured: hasAuthenticatedTurn,
+              source: "cloudflare-calls-turn",
+              expiresAt: now + 12 * 60 * 60 * 1000, // Cache 12 hours
+            };
             return NextResponse.json(
               {
-                iceServers: cachedIceServers,
-                turnConfigured: true,
-                source: "cloudflare-calls-turn",
+                iceServers: cachedConfig.iceServers,
+                turnConfigured: cachedConfig.turnConfigured,
+                source: cachedConfig.source,
               },
               { headers: NO_CACHE_HEADERS },
             );
@@ -112,14 +135,19 @@ export async function GET() {
           const { iceServers: sanitized, hasAuthenticatedTurn } =
             sanitizeIceServers(fetched);
 
-          if (hasAuthenticatedTurn && sanitized.length > 0) {
-            cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitized];
-            cacheExpiresAt = now + 10 * 60 * 1000; // Cache 10 minutes
+          if (sanitized.length > 0) {
+            const combined = [...DEFAULT_STUN_SERVERS, ...sanitized];
+            cachedConfig = {
+              iceServers: combined,
+              turnConfigured: hasAuthenticatedTurn,
+              source: "metered-api",
+              expiresAt: now + 10 * 60 * 1000, // Cache 10 minutes
+            };
             return NextResponse.json(
               {
-                iceServers: cachedIceServers,
-                turnConfigured: true,
-                source: "metered-api",
+                iceServers: cachedConfig.iceServers,
+                turnConfigured: cachedConfig.turnConfigured,
+                source: cachedConfig.source,
               },
               { headers: NO_CACHE_HEADERS },
             );
@@ -135,13 +163,18 @@ export async function GET() {
   if (turnServersJson) {
     const validated = parseAndValidateTurnServersJson(turnServersJson);
     if (validated) {
-      cachedIceServers = [...DEFAULT_STUN_SERVERS, ...validated.iceServers];
-      cacheExpiresAt = now + 60 * 60 * 1000; // 1 hour
+      const combined = [...DEFAULT_STUN_SERVERS, ...validated.iceServers];
+      cachedConfig = {
+        iceServers: combined,
+        turnConfigured: validated.turnConfigured,
+        source: "custom-json",
+        expiresAt: now + 60 * 60 * 1000, // 1 hour
+      };
       return NextResponse.json(
         {
-          iceServers: cachedIceServers,
-          turnConfigured: validated.turnConfigured,
-          source: "custom-json",
+          iceServers: cachedConfig.iceServers,
+          turnConfigured: cachedConfig.turnConfigured,
+          source: cachedConfig.source,
         },
         { headers: NO_CACHE_HEADERS },
       );

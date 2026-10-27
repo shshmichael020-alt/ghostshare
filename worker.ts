@@ -83,11 +83,11 @@ export default {
 
       if (turnServersJson) {
         const validated = parseAndValidateTurnServersJson(turnServersJson);
-        if (validated && validated.turnConfigured) {
+        if (validated) {
           const res = new Response(
             JSON.stringify({
               iceServers: [...DEFAULT_STUN_SERVERS, ...validated.iceServers],
-              turnConfigured: true,
+              turnConfigured: validated.turnConfigured,
               source: "worker-turn-secret",
             }),
             {
@@ -100,7 +100,7 @@ export default {
           return applySecurityHeaders(res, origin, allowed);
         }
       }
-      // If TURN_SERVERS_JSON is not configured or lacks authenticated TURN,
+      // If TURN_SERVERS_JSON is not configured or malformed,
       // fall through to OpenNext handler which evaluates dynamic Cloudflare/Metered APIs or defaults to STUN
     }
 

@@ -13,6 +13,11 @@ import {
   parseAndValidateTurnServersJson,
 } from "../lib/iceConfig";
 import {
+  GET as getIceServersRoute,
+  clearIceConfigCache,
+  setCachedIceConfig,
+} from "../app/api/signal/ice-servers/route";
+import {
   DEFAULT_ICE_SERVERS,
   fetchIceServerConfig,
   fetchIceServers,
@@ -786,4 +791,183 @@ test("ICE Sanitization: parseAndValidateTurnServersJson enforces authenticated T
   // 4. Invalid JSON
   assert.equal(parseAndValidateTurnServersJson("not json"), null);
   assert.equal(parseAndValidateTurnServersJson("[]"), null);
+});
+
+// ---------------------------------------------------------------------------
+// 10. ICE Route Cache Accuracy & Metadata Preservation Tests
+// ---------------------------------------------------------------------------
+
+test("ICE Route Cache: Cached STUN-only configuration preserves turnConfigured=false and source metadata", async () => {
+  const origTurnJson = process.env.TURN_SERVERS_JSON;
+  try {
+    process.env.TURN_SERVERS_JSON = JSON.stringify([
+      { urls: "stun:stun.custom-example.com:3478" },
+    ]);
+    clearIceConfigCache();
+
+    // 1st request: Populates cache
+    const res1 = await getIceServersRoute();
+    const data1 = (await res1.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(res1.status, 200);
+    assert.equal(data1.turnConfigured, false);
+    assert.equal(data1.source, "custom-json");
+    assert.equal(res1.headers.get("cache-control"), "no-store, no-cache, must-revalidate");
+    assert.ok(data1.iceServers.some((s) => JSON.stringify(s.urls).includes("stun.custom-example.com")));
+
+    // 2nd request: Cache hit
+    const res2 = await getIceServersRoute();
+    const data2 = (await res2.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(res2.status, 200);
+    // MUST NOT be hardcoded to true
+    assert.equal(data2.turnConfigured, false);
+    assert.equal(data2.source, "custom-json");
+    assert.equal(res2.headers.get("cache-control"), "no-store, no-cache, must-revalidate");
+  } finally {
+    if (origTurnJson !== undefined) {
+      process.env.TURN_SERVERS_JSON = origTurnJson;
+    } else {
+      delete process.env.TURN_SERVERS_JSON;
+    }
+    clearIceConfigCache();
+  }
+});
+
+test("ICE Route Cache: Cached authenticated TURN configuration preserves turnConfigured=true and source metadata", async () => {
+  const origTurnJson = process.env.TURN_SERVERS_JSON;
+  try {
+    process.env.TURN_SERVERS_JSON = JSON.stringify([
+      {
+        urls: "turn:relay.custom-example.com:443",
+        username: "valid_user",
+        credential: "valid_password",
+      },
+    ]);
+    clearIceConfigCache();
+
+    // 1st request: Populates cache
+    const res1 = await getIceServersRoute();
+    const data1 = (await res1.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(res1.status, 200);
+    assert.equal(data1.turnConfigured, true);
+    assert.equal(data1.source, "custom-json");
+    assert.equal(res1.headers.get("cache-control"), "no-store, no-cache, must-revalidate");
+
+    // 2nd request: Cache hit
+    const res2 = await getIceServersRoute();
+    const data2 = (await res2.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(res2.status, 200);
+    assert.equal(data2.turnConfigured, true);
+    assert.equal(data2.source, "custom-json");
+    assert.equal(res2.headers.get("cache-control"), "no-store, no-cache, must-revalidate");
+  } finally {
+    if (origTurnJson !== undefined) {
+      process.env.TURN_SERVERS_JSON = origTurnJson;
+    } else {
+      delete process.env.TURN_SERVERS_JSON;
+    }
+    clearIceConfigCache();
+  }
+});
+
+test("ICE Route Cache: Unauthenticated TURN entries cannot cause turnConfigured to become true", async () => {
+  const origTurnJson = process.env.TURN_SERVERS_JSON;
+  try {
+    // Missing credentials - must be discarded
+    process.env.TURN_SERVERS_JSON = JSON.stringify([
+      { urls: "turn:unauth.custom-example.com:3478" },
+    ]);
+    clearIceConfigCache();
+
+    const res = await getIceServersRoute();
+    const data = (await res.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(res.status, 200);
+    assert.equal(data.turnConfigured, false);
+    assert.equal(data.source, "default-stun");
+    assert.equal(res.headers.get("cache-control"), "no-store, no-cache, must-revalidate");
+  } finally {
+    if (origTurnJson !== undefined) {
+      process.env.TURN_SERVERS_JSON = origTurnJson;
+    } else {
+      delete process.env.TURN_SERVERS_JSON;
+    }
+    clearIceConfigCache();
+  }
+});
+
+test("ICE Route Cache: Explicit cache isolation and expiry re-evaluates upstream", async () => {
+  const origTurnJson = process.env.TURN_SERVERS_JSON;
+  try {
+    delete process.env.TURN_SERVERS_JSON;
+    delete process.env.CLOUDFLARE_TURN_KEY_ID;
+    delete process.env.METERED_API_KEY;
+
+    // 1. Manually set an unexpired cached entry with turnConfigured=false
+    setCachedIceConfig({
+      iceServers: [{ urls: "stun:cached.example.org:3478" }],
+      turnConfigured: false,
+      source: "mock-cache-source",
+      expiresAt: Date.now() + 10000,
+    });
+
+    const resHit = await getIceServersRoute();
+    const dataHit = (await resHit.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(dataHit.turnConfigured, false);
+    assert.equal(dataHit.source, "mock-cache-source");
+    assert.deepEqual(dataHit.iceServers, [{ urls: "stun:cached.example.org:3478" }]);
+
+    // 2. Expire the cache
+    setCachedIceConfig({
+      iceServers: [{ urls: "stun:cached.example.org:3478" }],
+      turnConfigured: false,
+      source: "mock-cache-source",
+      expiresAt: Date.now() - 1000,
+    });
+
+    const resMiss = await getIceServersRoute();
+    const dataMiss = (await resMiss.json()) as {
+      iceServers: RTCIceServer[];
+      turnConfigured: boolean;
+      source: string;
+    };
+
+    assert.equal(dataMiss.turnConfigured, false);
+    assert.equal(dataMiss.source, "default-stun"); // Falls back to default-stun after cache expires
+  } finally {
+    if (origTurnJson !== undefined) {
+      process.env.TURN_SERVERS_JSON = origTurnJson;
+    } else {
+      delete process.env.TURN_SERVERS_JSON;
+    }
+    clearIceConfigCache();
+  }
 });
