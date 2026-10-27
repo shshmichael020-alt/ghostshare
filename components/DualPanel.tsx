@@ -55,6 +55,9 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     triggerTransferRequest,
     retryFailedFile,
     pendingApproval,
+    selectedDestinations,
+    selectDestinationForFile,
+    clearDestinationForFile,
     handleAcceptTransfer,
     handleAcceptWithUserFile,
     handleDeclineTransfer,
@@ -671,16 +674,57 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                     Peer wants to stream {pendingApproval.files.length} file{pendingApproval.files.length > 1 ? "s" : ""} (
                     {formatSize(pendingFilesSize)})
                   </p>
-                  <div className="mt-2 space-y-1 max-h-24 overflow-y-auto">
-                    {pendingApproval.files.map((f) => (
-                      <div
-                        key={f.id}
-                        className="text-[10px] font-mono-telemetry text-on-surface-variant truncate flex justify-between"
-                      >
-                        <span className="truncate mr-2">• {f.name}</span>
-                        <span>{formatSize(f.size)}</span>
-                      </div>
-                    ))}
+                  <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto">
+                    {pendingApproval.files.map((f) => {
+                      const destName = selectedDestinations?.[f.id];
+                      const isLarge = f.size > 100 * 1024 * 1024;
+                      const isRam = !storageCapability?.isOpfsSupported;
+
+                      return (
+                        <div
+                          key={f.id}
+                          className="p-1.5 rounded-lg bg-surface-container/60 border border-white/[0.03] flex items-center justify-between text-[11px]"
+                        >
+                          <div className="truncate mr-2 min-w-0">
+                            <span className="text-on-surface font-medium truncate block">{f.name}</span>
+                            <span className="font-mono-telemetry text-on-surface-variant text-[10px]">{formatSize(f.size)}</span>
+                          </div>
+
+                          <div className="shrink-0 flex items-center gap-1">
+                            {destName ? (
+                              <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-secondary/15 text-secondary text-[10px] font-mono border border-secondary/20">
+                                <Check size={10} />
+                                <span className="truncate max-w-[90px]" title={destName}>{destName}</span>
+                                <button
+                                  onClick={() => clearDestinationForFile(f.id)}
+                                  className="hover:text-error ml-0.5 cursor-pointer"
+                                  title="Clear destination"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : storageCapability?.isFileSystemAccessSupported ? (
+                              <button
+                                onClick={() => selectDestinationForFile(f.id)}
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 cursor-pointer transition-colors border ${
+                                  isRam && isLarge
+                                    ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 animate-pulse"
+                                    : "bg-surface-container-highest hover:bg-white/[0.12] text-on-surface border-white/[0.06]"
+                                }`}
+                                title="Select destination file on disk"
+                              >
+                                <HardDrive size={10} className="text-secondary" />
+                                <span>{isRam && isLarge ? "Set File (!)" : "Choose File..."}</span>
+                              </button>
+                            ) : (
+                              <span className="text-[9px] font-mono text-on-surface-variant">
+                                {storageCapability?.isOpfsSupported ? "OPFS" : isLarge ? "⚠️ >100MB" : "RAM"}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   <div className="mt-2 text-[10px] font-mono-telemetry text-on-surface-variant">
@@ -703,15 +747,17 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                {storageCapability?.isFileSystemAccessSupported && (
-                  <button
-                    onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile()}
-                    className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-white/[0.12] text-on-surface text-xs font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-                    title="Select destination file on disk"
-                  >
-                    <HardDrive size={13} className="text-secondary" /> Save To File...
-                  </button>
-                )}
+                {pendingApproval.files.length === 1 &&
+                  storageCapability?.isFileSystemAccessSupported &&
+                  !selectedDestinations?.[pendingApproval.files[0].id] && (
+                    <button
+                      onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile(pendingApproval.files[0].id)}
+                      className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-white/[0.12] text-on-surface text-xs font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                      title="Select destination file on disk and accept"
+                    >
+                      <HardDrive size={13} className="text-secondary" /> Save To File &amp; Accept
+                    </button>
+                  )}
                 <button
                   onClick={handleAcceptTransfer}
                   className="flex-1 py-2 px-3 rounded-xl bg-secondary text-on-secondary font-medium text-xs hover:bg-secondary/90 transition-colors cursor-pointer flex items-center justify-center gap-1.5"

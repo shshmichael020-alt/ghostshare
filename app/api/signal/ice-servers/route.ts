@@ -1,28 +1,32 @@
 import { NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import {
+  DEFAULT_STUN_SERVERS,
+  sanitizeIceServers,
+  parseAndValidateTurnServersJson,
+} from "@/lib/iceConfig";
 
-// Cached credentials to prevent hammering the Metered API on every peer connection
+// In-memory cache for dynamic ICE server credentials
 let cachedIceServers: RTCIceServer[] | null = null;
 let cacheExpiresAt = 0;
 
-const DEFAULT_STUN_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.cloudflare.com:3478" },
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:global.stun.twilio.com:3478" },
-];
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+};
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const now = Date.now();
   if (cachedIceServers && now < cacheExpiresAt) {
-    return NextResponse.json({
-      iceServers: cachedIceServers,
-      turnConfigured: true,
-      source: "cached",
-    });
+    return NextResponse.json(
+      {
+        iceServers: cachedIceServers,
+        turnConfigured: true,
+        source: "cached",
+      },
+      { headers: NO_CACHE_HEADERS },
+    );
   }
 
   let env: Record<string, string | undefined> = {};
@@ -67,88 +71,91 @@ export async function GET() {
       clearTimeout(timeout);
 
       if (res.ok) {
-        const data = (await res.json()) as { iceServers?: RTCIceServer[] };
-        if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-          // Filter out port 53 if returned by upstream (browsers reject port 53)
-          const sanitizedServers = data.iceServers
-            .map((s) => {
-              if (Array.isArray(s.urls)) {
-                const filtered = s.urls.filter((u) => !u.includes(":53?") && !u.endsWith(":53"));
-                return { ...s, urls: filtered };
-              }
-              if (typeof s.urls === "string" && (s.urls.includes(":53?") || s.urls.endsWith(":53"))) {
-                return null;
-              }
-              return s;
-            })
-            .filter(Boolean) as RTCIceServer[];
+        const data = (await res.json()) as { iceServers?: unknown[] };
+        if (Array.isArray(data.iceServers)) {
+          const { iceServers: sanitized, hasAuthenticatedTurn } =
+            sanitizeIceServers(data.iceServers);
 
-          cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitizedServers];
-          cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours (well within 24h TTL)
-          return NextResponse.json({
-            iceServers: cachedIceServers,
-            turnConfigured: true,
-            source: "cloudflare-calls-turn",
-          });
+          if (hasAuthenticatedTurn && sanitized.length > 0) {
+            cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitized];
+            cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours
+            return NextResponse.json(
+              {
+                iceServers: cachedIceServers,
+                turnConfigured: true,
+                source: "cloudflare-calls-turn",
+              },
+              { headers: NO_CACHE_HEADERS },
+            );
+          }
         }
       }
-    } catch (cfErr) {
-      console.warn("Cloudflare Realtime TURN dynamic credential error:", cfErr);
+    } catch {
+      console.warn("Cloudflare Realtime TURN dynamic credential generation failed; evaluating fallbacks.");
     }
   }
 
-  // Option 2: Custom JSON servers provided via Cloudflare Worker secret
-  if (turnServersJson) {
-    try {
-      const cleanJson = turnServersJson.trim().replace(/^\uFEFF/, "");
-      const parsed = JSON.parse(cleanJson) as RTCIceServer[];
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        cachedIceServers = [...DEFAULT_STUN_SERVERS, ...parsed];
-        cacheExpiresAt = now + 60 * 60 * 1000; // 1 hour
-        return NextResponse.json({
-          iceServers: cachedIceServers,
-          turnConfigured: true,
-          source: "custom-json",
-        });
-      }
-    } catch (err: unknown) {
-      console.warn("Failed to parse TURN_SERVERS_JSON:", err);
-    }
-  }
-
-  // Option 2: Metered REST API dynamic credential fetching (official documented mechanism)
+  // Option 2: Metered REST API dynamic credential generation (documented server-side API)
   if (meteredApiKey && meteredAppName) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(
         `https://${meteredAppName}.metered.live/api/v1/turn/credentials?apiKey=${meteredApiKey}`,
-        { signal: controller.signal }
+        { signal: controller.signal },
       );
       clearTimeout(timeout);
 
       if (res.ok) {
-        const fetched = (await res.json()) as RTCIceServer[];
-        if (Array.isArray(fetched) && fetched.length > 0) {
-          cachedIceServers = [...DEFAULT_STUN_SERVERS, ...fetched];
-          cacheExpiresAt = now + 10 * 60 * 1000; // Cache 10 minutes
-          return NextResponse.json({
-            iceServers: cachedIceServers,
-            turnConfigured: true,
-            source: "metered-api",
-          });
+        const fetched = (await res.json()) as unknown[];
+        if (Array.isArray(fetched)) {
+          const { iceServers: sanitized, hasAuthenticatedTurn } =
+            sanitizeIceServers(fetched);
+
+          if (hasAuthenticatedTurn && sanitized.length > 0) {
+            cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitized];
+            cacheExpiresAt = now + 10 * 60 * 1000; // Cache 10 minutes
+            return NextResponse.json(
+              {
+                iceServers: cachedIceServers,
+                turnConfigured: true,
+                source: "metered-api",
+              },
+              { headers: NO_CACHE_HEADERS },
+            );
+          }
         }
       }
-    } catch (apiErr) {
-      console.warn("Metered dynamic credential API fetch error:", apiErr);
+    } catch {
+      console.warn("Metered dynamic credential API fetch failed; evaluating fallbacks.");
     }
   }
 
-  // Baseline: Fast Anycast STUN servers (no TURN key configured)
-  return NextResponse.json({
-    iceServers: DEFAULT_STUN_SERVERS,
-    turnConfigured: false,
-    source: "default-stun",
-    note: "No external TURN API key configured in Cloudflare Worker environment. Direct Anycast STUN mode active.",
-  });
+  // Option 3: Validated static/preconfigured TURN JSON from Worker secrets
+  if (turnServersJson) {
+    const validated = parseAndValidateTurnServersJson(turnServersJson);
+    if (validated) {
+      cachedIceServers = [...DEFAULT_STUN_SERVERS, ...validated.iceServers];
+      cacheExpiresAt = now + 60 * 60 * 1000; // 1 hour
+      return NextResponse.json(
+        {
+          iceServers: cachedIceServers,
+          turnConfigured: validated.turnConfigured,
+          source: "custom-json",
+        },
+        { headers: NO_CACHE_HEADERS },
+      );
+    }
+  }
+
+  // Baseline: Anycast STUN servers (STUN-only fallback when no authenticated TURN is configured)
+  return NextResponse.json(
+    {
+      iceServers: DEFAULT_STUN_SERVERS,
+      turnConfigured: false,
+      source: "default-stun",
+      note: "No external TURN credentials configured. Direct Anycast STUN mode active.",
+    },
+    { headers: NO_CACHE_HEADERS },
+  );
 }

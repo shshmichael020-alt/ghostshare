@@ -40,6 +40,7 @@ import {
   checkStorageCapability,
   StorageCapability,
   promptUserSaveFileHandle,
+  MAX_RAM_FALLBACK_BYTES,
 } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
@@ -130,6 +131,9 @@ export interface SessionContextType {
 
   // Inbound transfer (Receive)
   pendingApproval: PendingInboundApproval | null;
+  selectedDestinations: Record<string, string>;
+  selectDestinationForFile: (fileId: string) => Promise<boolean>;
+  clearDestinationForFile: (fileId: string) => void;
   handleAcceptTransfer: () => void;
   handleAcceptWithUserFile?: (fileId?: string) => Promise<boolean>;
   handleDeclineTransfer: () => void;
@@ -239,6 +243,7 @@ export function SessionProvider({
   >(new Map());
   const pendingChunksRef = useRef<Map<string, { payload: ArrayBuffer; offset?: number }[]>>(new Map());
   const userFileHandlesRef = useRef<Map<string, FileSystemFileHandle>>(new Map());
+  const [selectedDestinations, setSelectedDestinations] = useState<Record<string, string>>({});
 
   // Ephemeral Live Chat (In-memory ONLY)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -503,6 +508,13 @@ export function SessionProvider({
             }
           } catch (sinkErr) {
             console.error("Sink allocation error:", sinkErr);
+            userFileHandlesRef.current.delete(fileId);
+            setSelectedDestinations((prev) => {
+              if (!prev[fileId]) return prev;
+              const next = { ...prev };
+              delete next[fileId];
+              return next;
+            });
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
               ctrl.send(
@@ -575,6 +587,13 @@ export function SessionProvider({
             const errDesc = `Incomplete transfer: expected ${expectedSize} bytes, got ${active.streamer.getBytesWritten()} bytes`;
             activeSinksRef.current.delete(fileId);
             pendingChunksRef.current.delete(fileId);
+            userFileHandlesRef.current.delete(fileId);
+            setSelectedDestinations((prev) => {
+              if (!prev[fileId]) return prev;
+              const next = { ...prev };
+              delete next[fileId];
+              return next;
+            });
             setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
@@ -650,6 +669,13 @@ export function SessionProvider({
           } finally {
             activeSinksRef.current.delete(fileId);
             pendingChunksRef.current.delete(fileId);
+            userFileHandlesRef.current.delete(fileId);
+            setSelectedDestinations((prev) => {
+              if (!prev[fileId]) return prev;
+              const next = { ...prev };
+              delete next[fileId];
+              return next;
+            });
             setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
           }
         } else if (msg.type === "transfer-complete") {
@@ -831,6 +857,8 @@ export function SessionProvider({
 
     activeSinksRef.current.clear();
     pendingChunksRef.current.clear();
+    userFileHandlesRef.current.clear();
+    setSelectedDestinations({});
     pendingCandidatesRef.current = [];
     cancelTransferRef.current = false;
     currentOutboundBatchIdRef.current = null;
@@ -1540,28 +1568,82 @@ export function SessionProvider({
   // -------------------------------------------------------------
   // Inbound Transfer Actions (Receiving)
   // -------------------------------------------------------------
+  const selectDestinationForFile = useCallback(
+    async (fileId: string): Promise<boolean> => {
+      if (!pendingApproval) return false;
+      const file = pendingApproval.files.find((f) => f.id === fileId);
+      if (!file) return false;
+
+      try {
+        const handle = await promptUserSaveFileHandle(file.name);
+        if (!handle) return false;
+        userFileHandlesRef.current.set(fileId, handle);
+        setSelectedDestinations((prev) => ({ ...prev, [fileId]: handle.name }));
+        pushToast(`Destination mapped for ${file.name}: ${handle.name}`, "default");
+        return true;
+      } catch (err) {
+        pushToast(`Could not select destination file: ${(err as Error).message}`, "error");
+        return false;
+      }
+    },
+    [pendingApproval, pushToast],
+  );
+
+  const clearDestinationForFile = useCallback((fileId: string) => {
+    userFileHandlesRef.current.delete(fileId);
+    setSelectedDestinations((prev) => {
+      if (!prev[fileId]) return prev;
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  }, []);
+
   const handleAcceptTransfer = useCallback(() => {
     const ctrl = dcControlRef.current;
     if (!ctrl || ctrl.readyState !== "open") {
       pushToast("Connection not ready", "error");
       return;
     }
+    if (!pendingApproval) return;
+
+    // Preflight verification: When OPFS is unavailable, any file > 100 MB MUST have a user-selected file handle
+    if (!storageCapability?.isOpfsSupported) {
+      const unhandledLargeFiles = pendingApproval.files.filter(
+        (f) => f.size > MAX_RAM_FALLBACK_BYTES && !userFileHandlesRef.current.has(f.id),
+      );
+      if (unhandledLargeFiles.length > 0) {
+        const fileNames = unhandledLargeFiles.map((f) => `"${f.name}"`).join(", ");
+        pushToast(
+          `OPFS disk streaming is unavailable. Please select a destination file for: ${fileNames} (> 100 MB limit).`,
+          "error",
+        );
+        return;
+      }
+    }
+
     const acceptMsg: WebRTCMessage = {
       type: "transfer-accept",
-      batchId: pendingApproval?.batchId,
+      batchId: pendingApproval.batchId,
     };
     ctrl.send(JSON.stringify(acceptMsg));
-    pushToast("Transfer accepted. Streaming directly to local storage...", "success");
+    pushToast("Transfer accepted. Commencing P2P stream...", "success");
     setPendingApproval(null);
-  }, [pendingApproval, pushToast]);
+  }, [pendingApproval, storageCapability, pushToast]);
 
   const handleAcceptWithUserFile = useCallback(
     async (targetFileId?: string): Promise<boolean> => {
       if (!pendingApproval || pendingApproval.files.length === 0) return false;
       const targetFile = targetFileId
         ? pendingApproval.files.find((f) => f.id === targetFileId)
-        : pendingApproval.files[0];
-      if (!targetFile) return false;
+        : pendingApproval.files.length === 1
+        ? pendingApproval.files[0]
+        : null;
+
+      if (!targetFile) {
+        pushToast("Please select destinations for individual files in the list before accepting.", "error");
+        return false;
+      }
 
       try {
         const handle = await promptUserSaveFileHandle(targetFile.name);
@@ -1569,6 +1651,7 @@ export function SessionProvider({
           return false;
         }
         userFileHandlesRef.current.set(targetFile.id, handle);
+        setSelectedDestinations((prev) => ({ ...prev, [targetFile.id]: handle.name }));
         handleAcceptTransfer();
         return true;
       } catch (err) {
@@ -1581,6 +1664,7 @@ export function SessionProvider({
 
   const handleDeclineTransfer = useCallback(() => {
     userFileHandlesRef.current.clear();
+    setSelectedDestinations({});
     const ctrl = dcControlRef.current;
     if (ctrl && ctrl.readyState === "open") {
       const declineMsg: WebRTCMessage = {
@@ -1808,6 +1892,9 @@ export function SessionProvider({
         triggerTransferRequest,
         retryFailedFile,
         pendingApproval,
+        selectedDestinations,
+        selectDestinationForFile,
+        clearDestinationForFile,
         handleAcceptTransfer,
         handleAcceptWithUserFile,
         handleDeclineTransfer,

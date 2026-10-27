@@ -7,6 +7,12 @@ import {
   checkStorageCapability,
 } from "../lib/opfs";
 import {
+  isSafeIceUrl,
+  sanitizeIceServer,
+  sanitizeIceServers,
+  parseAndValidateTurnServersJson,
+} from "../lib/iceConfig";
+import {
   DEFAULT_ICE_SERVERS,
   fetchIceServerConfig,
   fetchIceServers,
@@ -570,4 +576,214 @@ test("TURN Provider: Generates authenticated credentials from Cloudflare Realtim
   assert.equal(turnServer!.username, "user_test_token_123");
   assert.equal(turnServer!.credential, "cred_test_secret_456");
   assert.ok(turnServer!.urls.some((u) => u.includes("turn.cloudflare.com")));
+});
+
+// ---------------------------------------------------------------------------
+// 7. Comprehensive ByteRangeTracker Boundary, Overlap, & Invalid Chunk Tests
+// ---------------------------------------------------------------------------
+
+test("ByteRangeTracker: Comprehensive boundary, duplicate, overlap, and gap matrix", () => {
+  const tracker = new ByteRangeTracker(1000);
+  tracker.addRange(100, 400); // commits [100..500)
+
+  // 1. Contained range with different boundaries (sub-range)
+  const subChunk = tracker.validateChunk(150, 200); // [150..350)
+  assert.equal(subChunk.isDuplicate, true);
+  assert.equal(subChunk.isConflictingOverlap, false);
+  assert.equal(subChunk.isOutOfBounds, false);
+
+  // 2. Exact duplicate chunk
+  const exactDup = tracker.validateChunk(100, 400); // [100..500)
+  assert.equal(exactDup.isDuplicate, true);
+  assert.equal(exactDup.isConflictingOverlap, false);
+
+  // 3. Right-extending overlap
+  const rightExtend = tracker.validateChunk(400, 200); // [400..600) extends past 500
+  assert.equal(rightExtend.isConflictingOverlap, true);
+  assert.equal(rightExtend.isDuplicate, false);
+
+  // 4. Left-extending overlap
+  const leftExtend = tracker.validateChunk(50, 100); // [50..150) penetrates into [100..500)
+  assert.equal(leftExtend.isConflictingOverlap, true);
+  assert.equal(leftExtend.isDuplicate, false);
+
+  // 5. Enclosing overlap
+  const enclosing = tracker.validateChunk(50, 500); // [50..550) completely encloses [100..500)
+  assert.equal(enclosing.isConflictingOverlap, true);
+  assert.equal(enclosing.isDuplicate, false);
+
+  // 6. Zero-length chunk
+  const zeroLen = tracker.validateChunk(200, 0);
+  assert.equal(zeroLen.isZeroLength, true);
+  assert.equal(zeroLen.isDuplicate, false);
+  assert.equal(zeroLen.isConflictingOverlap, false);
+  assert.equal(zeroLen.isOutOfBounds, false);
+
+  // 7. Negative offset
+  const negOffset = tracker.validateChunk(-50, 100);
+  assert.equal(negOffset.isOutOfBounds, true);
+  assert.equal(negOffset.isInvalid, true);
+
+  // 8. Non-finite offset (NaN, Infinity)
+  const nanOffset = tracker.validateChunk(NaN, 100);
+  assert.equal(nanOffset.isOutOfBounds, true);
+  assert.equal(nanOffset.isInvalid, true);
+
+  const infOffset = tracker.validateChunk(Infinity, 100);
+  assert.equal(infOffset.isOutOfBounds, true);
+  assert.equal(infOffset.isInvalid, true);
+
+  // 9. Non-finite length
+  const infLength = tracker.validateChunk(100, Infinity);
+  assert.equal(infLength.isOutOfBounds, true);
+  assert.equal(infLength.isInvalid, true);
+
+  // 10. Range beyond expected size
+  const pastEnd = tracker.validateChunk(800, 300); // 800 + 300 = 1100 > 1000
+  assert.equal(pastEnd.isOutOfBounds, true);
+  assert.equal(pastEnd.isInvalid, true);
+
+  // 11. Gap detection before and after
+  const missing = tracker.getMissingRanges();
+  assert.deepEqual(missing, [
+    { start: 0, end: 100 },
+    { start: 500, end: 1000 },
+  ]);
+
+  // Fill gap at [0..100)
+  tracker.addRange(0, 100);
+  assert.deepEqual(tracker.getMissingRanges(), [{ start: 500, end: 1000 }]);
+
+  // Fill remaining [500..1000)
+  tracker.addRange(500, 500);
+  assert.equal(tracker.isComplete(), true);
+  assert.deepEqual(tracker.getMissingRanges(), []);
+});
+
+// ---------------------------------------------------------------------------
+// 8. User-Selected File Destination Failure Safety
+// ---------------------------------------------------------------------------
+
+test("User Destination Failure: createWritable failure throws explicit error without falling back to RAM", async () => {
+  const failingHandle = {
+    createWritable: async () => {
+      throw new Error("Permission denied or disk locked");
+    },
+    getFile: async () => new File([new Uint8Array(500)], "locked.bin"),
+  } as unknown as FileSystemFileHandle;
+
+  const fileId = generateTransferId();
+
+  await assert.rejects(
+    async () => {
+      await createIncomingFileSink(
+        "test-fail-writable",
+        fileId,
+        "locked.bin",
+        "application/octet-stream",
+        500,
+        0,
+        { userFileHandle: failingHandle },
+      );
+    },
+    /Failed to open destination file for writing: Permission denied or disk locked/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 9. Unified ICE Server Sanitization & Validation Tests
+// ---------------------------------------------------------------------------
+
+test("ICE Sanitization: isSafeIceUrl correctly accepts valid schemes and filters port 53", () => {
+  // Safe URLs
+  assert.equal(isSafeIceUrl("stun:stun.cloudflare.com:3478"), true);
+  assert.equal(isSafeIceUrl("turn:turn.cloudflare.com:443?transport=tcp"), true);
+  assert.equal(isSafeIceUrl("turns:turn.cloudflare.com:5349?transport=tcp"), true);
+  assert.equal(isSafeIceUrl("stun:stun.relay.metered.ca:80"), true);
+
+  // Prohibited port 53
+  assert.equal(isSafeIceUrl("turn:turn.example.com:53"), false);
+  assert.equal(isSafeIceUrl("turn:turn.example.com:53?transport=tcp"), false);
+  assert.equal(isSafeIceUrl("turns:turn.example.com:53?transport=udp"), false);
+  assert.equal(isSafeIceUrl("stun:stun.example.com:53"), false);
+
+  // Invalid schemes
+  assert.equal(isSafeIceUrl("http://example.com"), false);
+  assert.equal(isSafeIceUrl("ws://example.com"), false);
+  assert.equal(isSafeIceUrl(""), false);
+  assert.equal(isSafeIceUrl(null), false);
+});
+
+test("ICE Sanitization: sanitizeIceServers strips port 53 and unauthenticated TURN", () => {
+  const mixedServers = [
+    // Entry with port 53 in array of URLs
+    {
+      urls: ["turn:turn.example.com:3478", "turn:turn.example.com:53"],
+      username: "user1",
+      credential: "pass1",
+    },
+    // Entry with ONLY port 53 (should be discarded)
+    {
+      urls: ["turn:turn.example.com:53"],
+      username: "user2",
+      credential: "pass2",
+    },
+    // Unauthenticated TURN entry (missing username/credential) -> should be discarded
+    {
+      urls: ["turn:unauth.example.com:3478"],
+    },
+    // Valid STUN entry
+    {
+      urls: ["stun:stun.google.com:19302"],
+    },
+  ];
+
+  const result = sanitizeIceServers(mixedServers);
+  assert.equal(result.hasAuthenticatedTurn, true);
+  assert.equal(result.iceServers.length, 2);
+
+  // First server should have port 53 removed from urls array
+  assert.deepEqual(result.iceServers[0].urls, "turn:turn.example.com:3478");
+  assert.equal(result.iceServers[0].username, "user1");
+
+  // Second server should be the STUN server
+  assert.deepEqual(result.iceServers[1].urls, "stun:stun.google.com:19302");
+});
+
+test("ICE Sanitization: parseAndValidateTurnServersJson enforces authenticated TURN requirement", () => {
+  // 1. Authenticated TURN JSON
+  const authTurnJson = JSON.stringify([
+    {
+      urls: "turn:relay.metered.ca:443",
+      username: "metered_user",
+      credential: "metered_pass",
+    },
+  ]);
+  const resAuth = parseAndValidateTurnServersJson(authTurnJson);
+  assert.ok(resAuth);
+  assert.equal(resAuth!.turnConfigured, true);
+  assert.equal(resAuth!.iceServers.length, 1);
+
+  // 2. STUN-only JSON (must NOT return turnConfigured: true)
+  const stunOnlyJson = JSON.stringify([
+    {
+      urls: "stun:stun.example.com:3478",
+    },
+  ]);
+  const resStun = parseAndValidateTurnServersJson(stunOnlyJson);
+  assert.ok(resStun);
+  assert.equal(resStun!.turnConfigured, false);
+
+  // 3. Unauthenticated TURN JSON (missing password) -> drops TURN, turnConfigured is false
+  const unauthTurnJson = JSON.stringify([
+    {
+      urls: "turn:unauth.example.com:3478",
+    },
+  ]);
+  const resUnauth = parseAndValidateTurnServersJson(unauthTurnJson);
+  assert.equal(resUnauth, null);
+
+  // 4. Invalid JSON
+  assert.equal(parseAndValidateTurnServersJson("not json"), null);
+  assert.equal(parseAndValidateTurnServersJson("[]"), null);
 });

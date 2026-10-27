@@ -47,6 +47,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     copyLink,
     shareLink,
     pendingApproval,
+    selectedDestinations,
+    selectDestinationForFile,
+    clearDestinationForFile,
     handleAcceptTransfer,
     handleAcceptWithUserFile,
     handleDeclineTransfer,
@@ -206,13 +209,54 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             </span>
           </div>
 
-          <div className="bg-surface-container rounded-xl p-3 max-h-48 overflow-y-auto flex flex-col gap-2 border border-white/[0.04]">
-            {pendingApproval.files.map((file) => (
-              <div key={file.id} className="flex items-center justify-between text-xs sm:text-sm">
-                <span className="text-on-surface font-medium truncate max-w-xs">{file.name}</span>
-                <span className="font-mono-telemetry text-on-surface-variant">{formatSize(file.size)}</span>
-              </div>
-            ))}
+          <div className="bg-surface-container rounded-xl p-3 max-h-56 overflow-y-auto flex flex-col gap-2.5 border border-white/[0.04]">
+            {pendingApproval.files.map((file) => {
+              const destName = selectedDestinations?.[file.id];
+              const isLarge = file.size > 100 * 1024 * 1024;
+              const isRam = !storageCapability?.isOpfsSupported;
+
+              return (
+                <div key={file.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-lg bg-surface-container-high/60 border border-white/[0.03]">
+                  <div className="flex flex-col min-w-0 pr-2">
+                    <span className="text-on-surface font-medium truncate text-xs sm:text-sm">{file.name}</span>
+                    <span className="font-mono-telemetry text-on-surface-variant text-[11px]">{formatSize(file.size)}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {destName ? (
+                      <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-secondary/15 text-secondary text-xs font-mono font-medium border border-secondary/20">
+                        <Check size={12} />
+                        <span className="truncate max-w-[140px]" title={destName}>Save to: {destName}</span>
+                        <button
+                          onClick={() => clearDestinationForFile(file.id)}
+                          className="hover:text-error transition-colors ml-1 cursor-pointer"
+                          title="Clear destination"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : storageCapability?.isFileSystemAccessSupported ? (
+                      <button
+                        onClick={() => selectDestinationForFile(file.id)}
+                        className={`px-2.5 py-1 rounded text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border ${
+                          isRam && isLarge
+                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 animate-pulse"
+                            : "bg-surface-container-highest hover:bg-white/[0.12] text-on-surface border-white/[0.06]"
+                        }`}
+                        title="Choose a specific destination file on local disk"
+                      >
+                        <HardDrive size={13} className="text-secondary" />
+                        <span>{isRam && isLarge ? "Set Destination (Required)" : "Choose Destination..."}</span>
+                      </button>
+                    ) : (
+                      <span className="text-[11px] font-mono text-on-surface-variant px-2 py-0.5 rounded bg-surface-container">
+                        {storageCapability?.isOpfsSupported ? "OPFS Sandbox" : isLarge ? "⚠️ Exceeds 100MB" : "RAM Buffer"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           {/* Storage Capability & Quota Preflight Details */}
@@ -278,16 +322,18 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <span>Decline</span>
             </button>
 
-            {storageCapability?.isFileSystemAccessSupported && (
-              <button
-                onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile()}
-                className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors flex items-center gap-1.5 border border-white/[0.08] cursor-pointer shadow-sm"
-                title="Select a local destination file to write chunks directly onto your drive"
-              >
-                <HardDrive size={16} className="text-secondary" />
-                <span>Save to Specific File...</span>
-              </button>
-            )}
+            {pendingApproval.files.length === 1 &&
+              storageCapability?.isFileSystemAccessSupported &&
+              !selectedDestinations?.[pendingApproval.files[0].id] && (
+                <button
+                  onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile(pendingApproval.files[0].id)}
+                  className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors flex items-center gap-1.5 border border-white/[0.08] cursor-pointer shadow-sm"
+                  title="Select a local destination file and immediately accept stream"
+                >
+                  <HardDrive size={16} className="text-secondary" />
+                  <span>Save to File &amp; Accept</span>
+                </button>
+              )}
 
             <button
               onClick={handleAcceptTransfer}
