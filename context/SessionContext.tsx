@@ -28,6 +28,7 @@ import {
   sanitizeChatText,
   generateTransferId,
   isValidProtocolId,
+  BINARY_FRAME_MAGIC,
 } from "@/lib/webrtc";
 import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
@@ -175,6 +176,11 @@ export function SessionProvider({
 
   // Inbound state
   const [pendingApproval, setPendingApproval] = useState<PendingInboundApproval | null>(null);
+  const pendingApprovalRef = useRef<PendingInboundApproval | null>(null);
+  useEffect(() => {
+    pendingApprovalRef.current = pendingApproval;
+  }, [pendingApproval]);
+
   const [activeReceiving, setActiveReceiving] = useState<ActiveReceivingItem | null>(null);
   const activeReceivingRef = useRef<ActiveReceivingItem | null>(null);
   useEffect(() => {
@@ -182,6 +188,10 @@ export function SessionProvider({
   }, [activeReceiving]);
 
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFileItem[]>([]);
+  const receivedFilesRef = useRef<ReceivedFileItem[]>([]);
+  useEffect(() => {
+    receivedFilesRef.current = receivedFiles;
+  }, [receivedFiles]);
 
   // In-memory active sinks for incoming files
   const activeSinksRef = useRef<
@@ -286,7 +296,7 @@ export function SessionProvider({
                     type: "transfer-decline",
                     batchId,
                     reason: "Invalid protocol file ID format",
-                    senderRole: role || undefined,
+                    senderRole: currentRoleRef.current || undefined,
                   }),
                 );
               }
@@ -300,10 +310,12 @@ export function SessionProvider({
             });
           }
 
-          setPendingApproval({
+          const approvalData = {
             batchId,
             files: sanitizedFiles,
-          });
+          };
+          pendingApprovalRef.current = approvalData;
+          setPendingApproval(approvalData);
           pushToast(`Peer requested to transfer ${sanitizedFiles.length} file(s)`, "default");
         } else if (msg.type === "transfer-accept") {
           if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
@@ -338,31 +350,32 @@ export function SessionProvider({
                   id: typeof fileId === "string" ? fileId : "unknown",
                   error: "Malformed protocol file ID",
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
             return;
           }
 
-          // Check if this file was already verified & completed in receivedFiles
-          const alreadyCompleted = receivedFiles.find((f) => f.id === fileId);
+          // Idempotent completion check: if file is already verified and completed, immediately ack
+          const alreadyCompleted = receivedFilesRef.current.find((f) => f.id === fileId);
           if (alreadyCompleted) {
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
               ctrl.send(
                 JSON.stringify({
-                  type: "file-ready",
+                  type: "file-ack",
                   id: fileId,
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
+            pendingChunksRef.current.delete(fileId);
             return;
           }
 
-          // Discard any existing active sink or pending chunks for this file ID (e.g. fresh retry attempt)
+          // Discard any previous active sink or chunks for this file ID (fresh retry)
           const existingSink = activeSinksRef.current.get(fileId);
           if (existingSink) {
             activeSinksRef.current.delete(fileId);
@@ -377,9 +390,27 @@ export function SessionProvider({
             pendingChunksRef.current.delete(fileId);
           }
 
+          const activeCode = currentCodeRef.current;
+          if (!activeCode) {
+            console.error("No active session code available for incoming file sink");
+            const ctrl = dcControlRef.current;
+            if (ctrl && ctrl.readyState === "open") {
+              ctrl.send(
+                JSON.stringify({
+                  type: "file-error",
+                  id: fileId,
+                  error: "Active session code not established",
+                  batchId: msg.batchId,
+                  senderRole: currentRoleRef.current || undefined,
+                }),
+              );
+            }
+            return;
+          }
+
           try {
             const streamer = await createIncomingFileSink(
-              code || "default",
+              activeCode,
               fileId,
               safeName,
               safeMime,
@@ -425,7 +456,7 @@ export function SessionProvider({
                   type: "file-ready",
                   id: fileId,
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
@@ -439,7 +470,7 @@ export function SessionProvider({
                   id: fileId,
                   error: (sinkErr as Error).message || "Storage allocation failed",
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
@@ -448,8 +479,8 @@ export function SessionProvider({
         } else if (msg.type === "file-end") {
           const fileId = msg.id;
 
-          // If already verified & completed (e.g. duplicate ack or re-ack), immediately send file-ack
-          const alreadyCompleted = receivedFiles.find((f) => f.id === fileId);
+          // If already verified & completed, immediately send file-ack
+          const alreadyCompleted = receivedFilesRef.current.find((f) => f.id === fileId);
           if (alreadyCompleted) {
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
@@ -458,10 +489,11 @@ export function SessionProvider({
                   type: "file-ack",
                   id: fileId,
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
+            pendingChunksRef.current.delete(fileId);
             return;
           }
 
@@ -479,10 +511,9 @@ export function SessionProvider({
 
           const expectedSize = active.meta.size;
           const startTime = Date.now();
-          const maxWaitMs = 12000;
+          const maxWaitMs = 15000;
 
-          // Bounded wait for in-flight binary chunks to arrive and finish disk writes.
-          // CRITICAL: active sink remains in activeSinksRef throughout this loop so chunks can be written!
+          // Bounded wait for in-flight binary chunks to arrive and finish disk writes
           while (active.streamer.getBytesWritten() < expectedSize && Date.now() - startTime < maxWaitMs) {
             await new Promise<void>((resolve) => {
               let resolved = false;
@@ -494,13 +525,14 @@ export function SessionProvider({
                 }
               };
               active.onChunkWritten = onDone;
-              setTimeout(onDone, 80);
+              setTimeout(onDone, 60);
             });
           }
 
           if (active.streamer.getBytesWritten() < expectedSize) {
             const errDesc = `Incomplete transfer: expected ${expectedSize} bytes, got ${active.streamer.getBytesWritten()} bytes`;
             activeSinksRef.current.delete(fileId);
+            pendingChunksRef.current.delete(fileId);
             setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
@@ -510,7 +542,7 @@ export function SessionProvider({
                   id: fileId,
                   error: errDesc,
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
@@ -536,7 +568,9 @@ export function SessionProvider({
 
             setReceivedFiles((prev) => {
               const existing = prev.filter((f) => f.id !== active.meta.id);
-              return [...existing, completedItem];
+              const next = [...existing, completedItem];
+              receivedFilesRef.current = next;
+              return next;
             });
 
             const ctrl = dcControlRef.current;
@@ -546,7 +580,7 @@ export function SessionProvider({
                   type: "file-ack",
                   id: fileId,
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
@@ -561,25 +595,27 @@ export function SessionProvider({
                   id: fileId,
                   error: (closeErr as Error).message || "Verification failed",
                   batchId: msg.batchId,
-                  senderRole: role || undefined,
+                  senderRole: currentRoleRef.current || undefined,
                 }),
               );
             }
             pushToast(`Verification failed for ${active.meta.name}: ${(closeErr as Error).message}`, "error");
           } finally {
             activeSinksRef.current.delete(fileId);
+            pendingChunksRef.current.delete(fileId);
             setActiveReceiving((prev) => (prev?.id === fileId ? null : prev));
           }
         } else if (msg.type === "transfer-complete") {
           setActiveReceiving(null);
           setPendingApproval(null);
+          pendingApprovalRef.current = null;
           pushToast("All incoming files transferred successfully!", "success");
         }
       } catch (err) {
         console.error("Error processing control message:", err);
       }
     },
-    [code, role, receivedFiles, pushToast],
+    [pushToast],
   );
 
   const handleBinaryChunk = useCallback(async (data: ArrayBuffer | Blob) => {
@@ -590,41 +626,80 @@ export function SessionProvider({
       rawBuffer = await (data as Blob).arrayBuffer();
     }
 
-    const frame = decodeBinaryFrame(rawBuffer);
-    let targetFileId: string | null = null;
-    let payload: ArrayBuffer = rawBuffer;
-    let chunkOffset: number | undefined = undefined;
+    const hasMagic =
+      rawBuffer.byteLength >= 2 &&
+      new DataView(rawBuffer).getUint16(0, false) === BINARY_FRAME_MAGIC;
 
-    if (frame) {
-      targetFileId = frame.fileId;
-      payload = frame.payload;
-      chunkOffset = frame.offset;
-    } else {
-      // Fallback: if unframed raw binary, route to currently active sink
-      if (activeReceivingRef.current) {
-        targetFileId = activeReceivingRef.current.id;
+    const frame = decodeBinaryFrame(rawBuffer);
+    if (!frame) {
+      if (hasMagic) {
+        console.warn("[GhostShare] Discarded corrupted binary frame with valid magic bytes");
+      } else {
+        console.warn("[GhostShare] Discarded unexpected non-protocol binary packet");
       }
+      return; // Reject malformed or unframed data explicitly
     }
 
-    if (targetFileId) {
-      const active = activeSinksRef.current.get(targetFileId);
-      if (active) {
-        await active.streamer.write(payload, chunkOffset);
-        const written = active.streamer.getBytesWritten();
-        active.receivedBytes = written;
-        setActiveReceiving((prev) =>
-          prev && prev.id === targetFileId ? { ...prev, receivedBytes: written } : prev,
+    const { fileId, chunkIndex, offset, payload } = frame;
+
+    // Discard chunks for already completed files (prevent duplicate buffering)
+    if (receivedFilesRef.current.some((f) => f.id === fileId)) {
+      return;
+    }
+
+    const active = activeSinksRef.current.get(fileId);
+    if (active) {
+      // Validate chunk bounds against expected file size
+      if (offset + payload.byteLength > active.meta.size) {
+        console.warn(
+          `[GhostShare] Chunk offset out of bounds for ${fileId}: offset ${offset} + len ${payload.byteLength} > expected ${active.meta.size}`,
         );
-        if (active.onChunkWritten) {
-          active.onChunkWritten();
-        }
-      } else {
-        const buffered = pendingChunksRef.current.get(targetFileId) || [];
-        buffered.push({ payload, offset: chunkOffset });
-        pendingChunksRef.current.set(targetFileId, buffered);
+        return;
       }
+
+      await active.streamer.write(payload, offset);
+      const written = active.streamer.getBytesWritten();
+      active.receivedBytes = written;
+      setActiveReceiving((prev) =>
+        prev && prev.id === fileId ? { ...prev, receivedBytes: written } : prev,
+      );
+      if (active.onChunkWritten) {
+        active.onChunkWritten();
+      }
+    } else {
+      // Check authorization for early-arriving chunk
+      const isAuthorized =
+        (pendingApprovalRef.current && pendingApprovalRef.current.files.some((f) => f.id === fileId)) ||
+        stagedFilesRef.current.some((f) => f.id === fileId);
+
+      if (!isAuthorized) {
+        console.warn(`[GhostShare] Discarding early chunk for unauthorized file ID: ${fileId}`);
+        return;
+      }
+
+      // Bound early chunk buffer to prevent memory exhaustion (max 64 chunks)
+      const MAX_PENDING_CHUNKS = 64;
+      const buffered = pendingChunksRef.current.get(fileId) || [];
+      if (buffered.length >= MAX_PENDING_CHUNKS) {
+        console.warn(`[GhostShare] Early chunk buffer full for file: ${fileId}`);
+        return;
+      }
+
+      buffered.push({ payload, offset });
+      pendingChunksRef.current.set(fileId, buffered);
     }
   }, []);
+
+  // Stable refs for event-handler dispatch to eliminate stale React closures
+  const handleControlMessageRef = useRef(handleControlMessage);
+  useEffect(() => {
+    handleControlMessageRef.current = handleControlMessage;
+  });
+
+  const handleBinaryChunkRef = useRef(handleBinaryChunk);
+  useEffect(() => {
+    handleBinaryChunkRef.current = handleBinaryChunk;
+  });
 
   const attachDataChannelListeners = useCallback(
     (channel: RTCDataChannel, label: string) => {
@@ -655,13 +730,13 @@ export function SessionProvider({
 
       channel.onmessage = (event) => {
         if (typeof event.data === "string") {
-          handleControlMessage(event.data);
+          handleControlMessageRef.current(event.data);
         } else {
-          handleBinaryChunk(event.data);
+          handleBinaryChunkRef.current(event.data);
         }
       };
     },
-    [handleControlMessage, handleBinaryChunk, pushToast],
+    [pushToast],
   );
 
   // -------------------------------------------------------------
@@ -724,6 +799,11 @@ export function SessionProvider({
     setRole(null);
     setCode(null);
     setSessionToken(null);
+    currentCodeRef.current = null;
+    currentTokenRef.current = null;
+    currentRoleRef.current = null;
+    pendingApprovalRef.current = null;
+    activeReceivingRef.current = null;
     setOutboundPhase("idle");
     setStagedFiles([]);
     setPendingApproval(null);
@@ -757,6 +837,9 @@ export function SessionProvider({
         const currentCode = data.code;
         const currentToken = data.receiverToken || null;
 
+        currentCodeRef.current = currentCode;
+        currentTokenRef.current = currentToken;
+        currentRoleRef.current = "creator";
         setCode(currentCode);
         setSessionToken(currentToken);
         setRole("creator");
@@ -1026,6 +1109,9 @@ export function SessionProvider({
           }
         }
 
+        currentCodeRef.current = codeToJoin;
+        currentTokenRef.current = currentToken;
+        currentRoleRef.current = "joiner";
         setCode(codeToJoin);
         setSessionToken(currentToken);
         setRole("joiner");

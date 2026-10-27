@@ -238,17 +238,29 @@ export function decodeBinaryFrame(
   if (view.getUint16(0, false) !== BINARY_FRAME_MAGIC) {
     return null;
   }
+  const version = view.getUint8(2);
+  if (version !== 1) return null; // Only protocol version 1 supported
+
+  const flags = view.getUint8(3);
+  if (flags !== 0) return null; // Flags must be 0 in current spec
+
   const idLen = view.getUint8(4);
+  if (idLen < 8 || idLen > 64) return null; // Protocol IDs bounded to 8..64 chars
+
   const headerLen = 5 + idLen + 4 + 8;
   if (buffer.byteLength < headerLen) return null;
 
   const idBytes = new Uint8Array(buffer, 5, idLen);
   const dec = new TextDecoder();
   const fileId = dec.decode(idBytes);
+  if (!isValidProtocolId(fileId)) return null; // Strictly validate protocol ID format
 
   const idxOffset = 5 + idLen;
   const chunkIndex = view.getUint32(idxOffset, false);
   const offset = Number(view.getBigUint64(idxOffset + 4, false));
+  if (!Number.isFinite(offset) || offset < 0 || offset > Number.MAX_SAFE_INTEGER) {
+    return null;
+  }
 
   const payload = buffer.slice(idxOffset + 12);
   return { fileId, chunkIndex, offset, payload };
@@ -349,27 +361,28 @@ export async function streamFileOverDataChannel(
 
   // Await explicit receiver file-ready confirmation before sending binary data.
   // Register event listeners BEFORE dispatching the file-start message to eliminate race conditions.
-  await new Promise<void>((resolve, reject) => {
+  const readyResult = await new Promise<{ alreadyCompleted: boolean }>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const onMessage = (e: MessageEvent) => {
       if (typeof e.data === "string") {
         try {
-          const m = JSON.parse(e.data) as WebRTCMessage;
-          if (
-            m.type === "file-ready" &&
-            m.id === fileId &&
-            (!batchId || !m.batchId || m.batchId === batchId)
-          ) {
-            cleanup();
-            resolve();
-          } else if (
-            m.type === "file-error" &&
-            m.id === fileId &&
-            (!batchId || !m.batchId || m.batchId === batchId)
-          ) {
-            cleanup();
-            reject(new Error(`Receiver rejected file: ${m.error}`));
+          const m = JSON.parse(e.data) as Record<string, unknown>;
+          const msgFileId = typeof m.id === "string" ? m.id : undefined;
+          const msgBatchId = typeof m.batchId === "string" ? m.batchId : undefined;
+          const matchesBatch = batchId ? msgBatchId === batchId : true;
+          if (msgFileId === fileId && matchesBatch) {
+            if (m.type === "file-ready") {
+              cleanup();
+              resolve({ alreadyCompleted: false });
+            } else if (m.type === "file-ack") {
+              // Receiver already has this file verified & complete! Fast-path finish.
+              cleanup();
+              resolve({ alreadyCompleted: true });
+            } else if (m.type === "file-error") {
+              cleanup();
+              reject(new Error(`Receiver rejected file: ${String(m.error || "Unknown error")}`));
+            }
           }
         } catch {}
       }
@@ -412,6 +425,12 @@ export async function streamFileOverDataChannel(
       reject(new Error(`Failed to send file-start signal: ${(err as Error).message}`));
     }
   });
+
+  // If the receiver already verified this exact file from a prior attempt, skip streaming bytes
+  if (readyResult.alreadyCompleted) {
+    onProgress(total, total);
+    return;
+  }
 
   // Stream binary slices with backpressure flow control and framed metadata
   let chunkIndex = 0;
@@ -466,21 +485,18 @@ export async function streamFileOverDataChannel(
     const onMessage = (e: MessageEvent) => {
       if (typeof e.data === "string") {
         try {
-          const m = JSON.parse(e.data) as WebRTCMessage;
-          if (
-            m.type === "file-ack" &&
-            m.id === fileId &&
-            (!batchId || !m.batchId || m.batchId === batchId)
-          ) {
-            cleanup();
-            resolve();
-          } else if (
-            m.type === "file-error" &&
-            m.id === fileId &&
-            (!batchId || !m.batchId || m.batchId === batchId)
-          ) {
-            cleanup();
-            reject(new Error(`Receiver failed to persist file: ${m.error}`));
+          const m = JSON.parse(e.data) as Record<string, unknown>;
+          const msgFileId = typeof m.id === "string" ? m.id : undefined;
+          const msgBatchId = typeof m.batchId === "string" ? m.batchId : undefined;
+          const matchesBatch = batchId ? msgBatchId === batchId : true;
+          if (msgFileId === fileId && matchesBatch) {
+            if (m.type === "file-ack") {
+              cleanup();
+              resolve();
+            } else if (m.type === "file-error") {
+              cleanup();
+              reject(new Error(`Receiver failed to persist file: ${String(m.error || "Unknown error")}`));
+            }
           }
         } catch {}
       }

@@ -57,6 +57,14 @@ class MockDataChannel extends EventTarget {
       this.peer.close();
     }
   }
+
+  override addEventListener(
+    type: string,
+    callback: (e: any) => void | Promise<void>,
+    options?: boolean | AddEventListenerOptions,
+  ): void {
+    super.addEventListener(type, callback as EventListenerOrEventListenerObject, options);
+  }
 }
 
 function createMockChannelPair(label: string): [MockDataChannel, MockDataChannel] {
@@ -238,8 +246,8 @@ test("Lifecycle 1: Successful end-to-end readiness and completion acknowledgemen
   assert.ok(progressCalled, "Progress callback should have fired");
   assert.ok(verifiedCalled, "Verification callback should have fired");
   assert.ok(receivedFile, "Receiver must produce verified File");
-  assert.equal(receivedFile!.size, fileContent.length);
-  assert.equal(receivedFile!.name, "test_document.pdf");
+  assert.equal((receivedFile as any).size, fileContent.length);
+  assert.equal((receivedFile as any).name, "test_document.pdf");
 });
 
 test("Lifecycle 2: Receiver sink-allocation failure sends correlated file-error and sender rejects", async () => {
@@ -681,12 +689,12 @@ test("Lifecycle 14: Simultaneous transfers in both directions over dedicated cha
   ]);
 
   assert.ok(fileOnB);
-  assert.equal(fileOnB!.size, 20 * 1024);
-  assert.equal(fileOnB!.name, "from_A.pdf");
+  assert.equal((fileOnB as any).size, 20 * 1024);
+  assert.equal((fileOnB as any).name, "from_A.pdf");
 
   assert.ok(fileOnA);
-  assert.equal(fileOnA!.size, 10 * 1024);
-  assert.equal(fileOnA!.name, "from_B.jpg");
+  assert.equal((fileOnA as any).size, 10 * 1024);
+  assert.equal((fileOnA as any).name, "from_B.jpg");
 });
 
 test("Lifecycle 15: OPFS fallback enforces size ceiling on RAM buffer", async () => {
@@ -712,4 +720,182 @@ test("Lifecycle 16: Completed received files are never marked failed by stale me
 
   // Re-ack confirmation instead of error
   assert.ok(completedList.length === 1);
+});
+
+test("Lifecycle 17: decodeBinaryFrame strictly rejects malformed, invalid, or corrupted frames", () => {
+  const validId = generateTransferId();
+  const enc = new TextEncoder();
+  const idBytes = enc.encode(validId);
+  const payloadBytes = new Uint8Array([1, 2, 3, 4]);
+
+  // 1. Valid frame decodes successfully
+  const validBuf = encodeBinaryFrame(validId, 0, 0, payloadBytes.buffer);
+  const decodedValid = decodeBinaryFrame(validBuf);
+  assert.ok(decodedValid);
+  assert.equal(decodedValid.fileId, validId);
+  assert.equal(decodedValid.chunkIndex, 0);
+  assert.equal(decodedValid.offset, 0);
+  assert.equal(decodedValid.payload.byteLength, 4);
+
+  // 2. Reject buffer smaller than minimum header
+  assert.equal(decodeBinaryFrame(new ArrayBuffer(10)), null);
+
+  // 3. Reject wrong magic bytes
+  const badMagicBuf = validBuf.slice(0);
+  new DataView(badMagicBuf).setUint16(0, 0x1234, false);
+  assert.equal(decodeBinaryFrame(badMagicBuf), null);
+
+  // 4. Reject unsupported version (e.g. version 2)
+  const badVersionBuf = validBuf.slice(0);
+  new DataView(badVersionBuf).setUint8(2, 2);
+  assert.equal(decodeBinaryFrame(badVersionBuf), null);
+
+  // 5. Reject non-zero flags
+  const badFlagsBuf = validBuf.slice(0);
+  new DataView(badFlagsBuf).setUint8(3, 0xff);
+  assert.equal(decodeBinaryFrame(badFlagsBuf), null);
+
+  // 6. Reject idLen too short (< 8) or too long (> 64)
+  const shortIdBuf = validBuf.slice(0);
+  new DataView(shortIdBuf).setUint8(4, 4);
+  assert.equal(decodeBinaryFrame(shortIdBuf), null);
+
+  const longIdBuf = validBuf.slice(0);
+  new DataView(longIdBuf).setUint8(4, 70);
+  assert.equal(decodeBinaryFrame(longIdBuf), null);
+
+  // 7. Reject invalid protocol ID format (path traversal or invalid characters)
+  const traversalId = "../../../secret";
+  const travIdBytes = enc.encode(traversalId);
+  const travBuf = new ArrayBuffer(5 + travIdBytes.length + 12);
+  const travView = new DataView(travBuf);
+  travView.setUint16(0, 0x4753, false); // BINARY_FRAME_MAGIC
+  travView.setUint8(2, 1); // version
+  travView.setUint8(3, 0); // flags
+  travView.setUint8(4, travIdBytes.length);
+  new Uint8Array(travBuf, 5, travIdBytes.length).set(travIdBytes);
+  assert.equal(decodeBinaryFrame(travBuf), null);
+
+  // 8. Reject invalid offset (e.g. negative or > MAX_SAFE_INTEGER)
+  const badOffsetBuf = validBuf.slice(0);
+  const idxOffset = 5 + idBytes.length;
+  // Write a huge uint64 offset exceeding MAX_SAFE_INTEGER (e.g. 0xFFFFFFFFFFFFFFFF)
+  new DataView(badOffsetBuf).setBigUint64(idxOffset + 4, BigInt("18446744073709551615"), false);
+  assert.equal(decodeBinaryFrame(badOffsetBuf), null);
+});
+
+test("Lifecycle 18: Already-completed file receives instant file-ack without streaming binary chunks", async () => {
+  const [senderCtrl, receiverCtrl] = createMockChannelPair("control");
+  const [senderData, receiverData] = createMockChannelPair("file-transfer");
+
+  const fileId = generateTransferId();
+  const file = new File([new Uint8Array(100 * 1024)], "already_done.dat", { type: "application/octet-stream" });
+
+  let binaryChunksReceived = 0;
+  receiverData.addEventListener("message", () => {
+    binaryChunksReceived++;
+  });
+
+  // Mock receiver behavior for already-completed file: reply immediately with file-ack on file-start
+  receiverCtrl.addEventListener("message", (e) => {
+    const msg = JSON.parse(e.data as string) as WebRTCMessage;
+    if (msg.type === "file-start" && msg.id === fileId) {
+      receiverCtrl.send(JSON.stringify({
+        type: "file-ack",
+        id: fileId,
+        batchId: msg.batchId,
+      }));
+    }
+  });
+
+  let progressReported = 0;
+  await streamFileOverDataChannel(
+    senderData as unknown as RTCDataChannel,
+    file,
+    fileId,
+    0,
+    (sent, total) => {
+      progressReported = sent;
+    },
+    () => false,
+    senderCtrl as unknown as RTCDataChannel,
+  );
+
+  // Sender should recognize instant completion, report 100% progress, and stream ZERO binary chunks!
+  assert.equal(progressReported, file.size);
+  assert.equal(binaryChunksReceived, 0, "Zero binary chunks should be sent when file is already completed");
+});
+
+test("Lifecycle 19: Strict batch correlation rejects messages from foreign batches", async () => {
+  const [senderCtrl, receiverCtrl] = createMockChannelPair("control");
+  const [senderData, receiverData] = createMockChannelPair("file-transfer");
+
+  const fileId = generateTransferId();
+  const targetBatchId = `batch_${generateTransferId()}`;
+  const foreignBatchId = `batch_${generateTransferId()}`;
+  const file = new File([new Uint8Array(1024)], "batch_test.txt", { type: "text/plain" });
+
+  let sink: Awaited<ReturnType<typeof createIncomingFileSink>> | null = null;
+
+  receiverCtrl.addEventListener("message", async (e) => {
+    const msg = JSON.parse(e.data as string) as WebRTCMessage;
+    if (msg.type === "file-start" && msg.id === fileId) {
+      // 1. Send file-ready with foreign batchId (should be ignored by sender)
+      receiverCtrl.send(JSON.stringify({
+        type: "file-ready",
+        id: fileId,
+        batchId: foreignBatchId,
+      }));
+
+      // 2. Short delay then send file-ready with correct targetBatchId
+      setTimeout(async () => {
+        sink = await createIncomingFileSink("test-session", msg.id, msg.name, msg.mimeType, msg.size);
+        receiverCtrl.send(JSON.stringify({
+          type: "file-ready",
+          id: fileId,
+          batchId: targetBatchId,
+        }));
+      }, 50);
+    } else if (msg.type === "file-end" && msg.id === fileId && sink) {
+      // Send file-ack with foreign batchId first (should be ignored by sender)
+      receiverCtrl.send(JSON.stringify({
+        type: "file-ack",
+        id: fileId,
+        batchId: foreignBatchId,
+      }));
+
+      // Short delay then send genuine file-ack with targetBatchId
+      setTimeout(async () => {
+        await sink!.close();
+        receiverCtrl.send(JSON.stringify({
+          type: "file-ack",
+          id: fileId,
+          batchId: targetBatchId,
+        }));
+      }, 50);
+    }
+  });
+
+  receiverData.addEventListener("message", async (e) => {
+    if (sink) {
+      const decoded = decodeBinaryFrame(e.data as ArrayBuffer);
+      if (decoded && decoded.fileId === fileId) {
+        await sink.write(decoded.payload, decoded.offset);
+      }
+    }
+  });
+
+  // Streaming with strict batchId must complete successfully by filtering out foreign batch messages
+  await streamFileOverDataChannel(
+    senderData as unknown as RTCDataChannel,
+    file,
+    fileId,
+    0,
+    () => {},
+    () => false,
+    senderCtrl as unknown as RTCDataChannel,
+    targetBatchId,
+  );
+
+  assert.ok(sink);
 });
