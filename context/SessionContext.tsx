@@ -29,8 +29,17 @@ import {
   generateTransferId,
   isValidProtocolId,
   BINARY_FRAME_MAGIC,
+  fetchIceServerConfig,
+  inspectActiveCandidatePair,
+  CandidatePairStats,
+  getSanitizedConnectionDiagnostic,
 } from "@/lib/webrtc";
-import { createIncomingFileSink, OpfsFileStreamer } from "@/lib/opfs";
+import {
+  createIncomingFileSink,
+  OpfsFileStreamer,
+  checkStorageCapability,
+  StorageCapability,
+} from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
 import { useToasts } from "@/lib/useToasts";
@@ -76,12 +85,19 @@ export interface ActiveReceivingItem {
   size: number;
   receivedBytes: number;
   batchId?: string;
+  status?: "streaming" | "verifying" | "done" | "error";
 }
 
 export interface SessionContextType {
   // Mode & navigation
   mode: SessionMode;
   setMode: (mode: SessionMode) => void;
+
+  // Storage & ICE telemetry
+  storageCapability: StorageCapability | null;
+  turnConfigured: boolean;
+  candidatePair: CandidatePairStats | null;
+  connectionDiagnostic: string | null;
 
   // Session metadata & connection
   role: "creator" | "joiner" | null;
@@ -162,6 +178,16 @@ export function SessionProvider({
   const [remainingTtl, setRemainingTtl] = useState<number | null>(null);
   const [initialTtl, setInitialTtl] = useState<number>(DEFAULT_TTL_SECONDS);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
+
+  // Storage & ICE telemetry state
+  const [storageCapability, setStorageCapability] = useState<StorageCapability | null>(null);
+  const [turnConfigured, setTurnConfigured] = useState<boolean>(false);
+  const [candidatePair, setCandidatePair] = useState<CandidatePairStats | null>(null);
+  const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
+
+  useEffect(() => {
+    checkStorageCapability().then(setStorageCapability).catch(() => {});
+  }, []);
 
   // Outbound state
   const [stagedFiles, setStagedFiles] = useState<StagedItem[]>([]);
@@ -316,7 +342,16 @@ export function SessionProvider({
           };
           pendingApprovalRef.current = approvalData;
           setPendingApproval(approvalData);
-          pushToast(`Peer requested to transfer ${sanitizedFiles.length} file(s)`, "default");
+
+          const totalReqBytes = sanitizedFiles.reduce((sum, f) => sum + f.size, 0);
+          if (storageCapability?.available !== undefined && totalReqBytes > storageCapability.available) {
+            pushToast(
+              `Storage warning: Incoming batch (${Math.round(totalReqBytes / (1024 * 1024))} MB) exceeds available space (${Math.round(storageCapability.available / (1024 * 1024))} MB)`,
+              "error",
+            );
+          } else {
+            pushToast(`Peer requested to transfer ${sanitizedFiles.length} file(s)`, "default");
+          }
         } else if (msg.type === "transfer-accept") {
           if (msg.batchId && currentOutboundBatchIdRef.current && msg.batchId !== currentOutboundBatchIdRef.current) {
             console.warn(`Ignoring transfer-accept for mismatched batch ${msg.batchId}`);
@@ -446,6 +481,7 @@ export function SessionProvider({
               size: safeSize,
               receivedBytes: streamer.getBytesWritten(),
               batchId: msg.batchId,
+              status: "streaming",
             });
 
             // Signal peer on control channel that sink is ready
@@ -530,6 +566,7 @@ export function SessionProvider({
           }
 
           if (active.streamer.getBytesWritten() < expectedSize) {
+            await active.streamer.abort().catch(() => {});
             const errDesc = `Incomplete transfer: expected ${expectedSize} bytes, got ${active.streamer.getBytesWritten()} bytes`;
             activeSinksRef.current.delete(fileId);
             pendingChunksRef.current.delete(fileId);
@@ -549,6 +586,10 @@ export function SessionProvider({
             pushToast(`Transfer failed for ${active.meta.name}: incomplete data received`, "error");
             return;
           }
+
+          setActiveReceiving((prev) =>
+            prev && prev.id === fileId ? { ...prev, status: "verifying" } : prev,
+          );
 
           try {
             const file = await active.streamer.close();
@@ -587,6 +628,7 @@ export function SessionProvider({
             pushToast(`Received: ${active.meta.name} (Verified & Persisted)`, "success");
           } catch (closeErr) {
             console.error("File finalization error:", closeErr);
+            await active.streamer.abort().catch(() => {});
             const ctrl = dcControlRef.current;
             if (ctrl && ctrl.readyState === "open") {
               ctrl.send(
@@ -799,6 +841,8 @@ export function SessionProvider({
     setRole(null);
     setCode(null);
     setSessionToken(null);
+    setCandidatePair(null);
+    setConnectionDiagnostic(null);
     currentCodeRef.current = null;
     currentTokenRef.current = null;
     currentRoleRef.current = null;
@@ -848,8 +892,9 @@ export function SessionProvider({
         setInitialTtl(rem || selectedTtl);
         setConnStatus("awaiting");
 
-        const iceServers = await fetchIceServers();
-        const pc = createPeerConnection(iceServers);
+        const iceConfig = await fetchIceServerConfig();
+        setTurnConfigured(iceConfig.turnConfigured);
+        const pc = createPeerConnection(iceConfig.iceServers);
         pcRef.current = pc;
 
         // Debounced candidate dispatch
@@ -908,6 +953,11 @@ export function SessionProvider({
             setConnStatus("connected");
             setNatWarning(null);
             setError(null);
+            inspectActiveCandidatePair(pc).then((pair) => {
+              setCandidatePair(pair);
+              const diag = getSanitizedConnectionDiagnostic("connected", iceState, iceConfig.turnConfigured, pair);
+              setConnectionDiagnostic(diag);
+            });
           } else if (iceState === "disconnected" && hasEverConnected) {
             // Grace period: transient mobile carrier latency (only after initial connection was established)
             if (!iceDisconnectTimer) {
@@ -923,9 +973,9 @@ export function SessionProvider({
               iceDisconnectTimer = null;
             }
             setConnStatus("failed");
-            setNatWarning(
-              "Direct P2P UDP tunnel could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
-            );
+            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
+            setConnectionDiagnostic(diag);
+            setNatWarning(diag);
           }
         };
 
@@ -1119,8 +1169,9 @@ export function SessionProvider({
         lastSignalSeqRef.current = 0;
 
         // 3. Create PeerConnection & Separate Data Channels
-        const iceServers = await fetchIceServers();
-        const pc = createPeerConnection(iceServers);
+        const iceConfig = await fetchIceServerConfig();
+        setTurnConfigured(iceConfig.turnConfigured);
+        const pc = createPeerConnection(iceConfig.iceServers);
         pcRef.current = pc;
 
         const safeAddCandidate = async (targetPc: RTCPeerConnection, cand: RTCIceCandidateInit) => {
@@ -1194,6 +1245,11 @@ export function SessionProvider({
             setConnStatus("connected");
             setNatWarning(null);
             setError(null);
+            inspectActiveCandidatePair(pc).then((pair) => {
+              setCandidatePair(pair);
+              const diag = getSanitizedConnectionDiagnostic("connected", iceState, iceConfig.turnConfigured, pair);
+              setConnectionDiagnostic(diag);
+            });
           } else if (iceState === "disconnected" && hasEverConnected) {
             // Grace period: transient mobile carrier latency (only after initial connection was established)
             if (!iceDisconnectTimer) {
@@ -1210,9 +1266,9 @@ export function SessionProvider({
               iceDisconnectTimer = null;
             }
             setConnStatus("failed");
-            setNatWarning(
-              "Direct P2P UDP tunnel could not be established. Check if either device is on a restricted network or firewall blocking WebRTC.",
-            );
+            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
+            setConnectionDiagnostic(diag);
+            setNatWarning(diag);
           }
         };
 
@@ -1704,6 +1760,10 @@ export function SessionProvider({
         remainingTtl,
         initialTtl,
         copiedLink,
+        storageCapability,
+        turnConfigured,
+        candidatePair,
+        connectionDiagnostic,
         startHostSession,
         joinGuestSession,
         disconnectSession,

@@ -52,6 +52,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     activeReceiving,
     receivedFiles,
     downloadAllFiles,
+    storageCapability,
+    turnConfigured,
+    candidatePair,
+    connectionDiagnostic,
   } = useGhostSession();
 
   const [downloadingAll, setDownloadingAll] = useState(false);
@@ -209,6 +213,33 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               </div>
             ))}
           </div>
+
+          {/* Storage Capability & Quota Details */}
+          {(() => {
+            const batchTotal = pendingApproval.files.reduce((acc, f) => acc + f.size, 0);
+            const isQuotaExceeded = storageCapability?.available !== undefined && batchTotal > storageCapability.available;
+            return (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between text-xs text-on-surface-variant font-mono-telemetry bg-surface-container/60 p-2.5 rounded-lg border border-white/[0.04]">
+                  <span className="flex items-center gap-1.5">
+                    <HardDrive size={13} className="text-secondary" />
+                    Storage: {storageCapability?.isOpfsSupported ? "OPFS Direct-to-Disk" : "RAM Buffer (100 MB max)"}
+                  </span>
+                  {storageCapability?.available !== undefined && (
+                    <span>Device Free: {formatSize(storageCapability.available)}</span>
+                  )}
+                </div>
+                {isQuotaExceeded && (
+                  <div className="p-3 rounded-lg bg-error-container/20 border border-error/30 text-error flex items-center gap-2 text-xs">
+                    <AlertTriangle size={15} className="shrink-0" />
+                    <span>
+                      Insufficient device storage: incoming batch requires {formatSize(batchTotal)}, but only {formatSize(storageCapability.available!)} is free.
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="flex items-center justify-end gap-3 pt-2">
             <button
@@ -417,7 +448,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 <div className="text-right">
                   <span className="font-mono-telemetry text-on-surface-variant block uppercase">Tunnel State</span>
                   <span className="font-mono-data text-on-surface font-medium">
-                    {connStatus === "connected" ? "P2P Active" : "Sender Detached (Files Retained)"}
+                    {connectionDiagnostic || (connStatus === "connected" ? "P2P Active" : "Sender Detached (Files Retained)")}
                   </span>
                 </div>
                 <button
@@ -438,7 +469,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   <div className="flex items-center gap-2">
                     <Loader2 size={16} className="animate-spin text-secondary" />
                     <span className="font-body-md text-on-surface font-medium truncate max-w-sm">
-                      Writing to Disk: {activeReceiving.name}
+                      {activeReceiving.status === "verifying"
+                        ? `Verifying Disk Integrity & Completeness: ${activeReceiving.name}`
+                        : `Streaming to Storage: ${activeReceiving.name}`}
                     </span>
                   </div>
                   <span className="font-mono-telemetry text-secondary text-xs">
@@ -460,20 +493,32 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             {/* Low-Level Telemetry Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/[0.06]">
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Transport</span>
-                <span className="font-mono-telemetry text-on-surface">WebRTC / SCTP</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Connection</span>
+                <span className="font-mono-telemetry text-on-surface truncate block">
+                  {candidatePair
+                    ? candidatePair.isRelayed
+                      ? "TURN Relay"
+                      : `Direct P2P (${candidatePair.localCandidateType})`
+                    : turnConfigured
+                    ? "P2P + Relay Ready"
+                    : "Direct STUN"}
+                </span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">Disk Cache</span>
-                <span className="font-mono-telemetry text-tertiary">OPFS (NVMe Writable)</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Storage Engine</span>
+                <span className="font-mono-telemetry text-tertiary truncate block">
+                  {storageCapability?.isOpfsSupported ? "OPFS Direct Disk" : "RAM Buffer (100MB Max)"}
+                </span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
-                <span className="font-label-caps text-on-surface-variant uppercase block">NAT Traversal</span>
-                <span className="font-mono-telemetry text-on-surface">STUN / Auto-Restart</span>
+                <span className="font-label-caps text-on-surface-variant uppercase block">Free Quota</span>
+                <span className="font-mono-telemetry text-on-surface truncate block">
+                  {storageCapability?.available !== undefined ? formatSize(storageCapability.available) : "Unbounded / Local"}
+                </span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Retention Window</span>
-                <span className="font-mono-telemetry text-secondary">
+                <span className="font-mono-telemetry text-secondary truncate block">
                   {remaining !== null ? `${formatCountdown(remaining)} remaining` : "1 Hour Default"}
                 </span>
               </div>

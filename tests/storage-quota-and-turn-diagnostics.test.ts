@@ -1,0 +1,429 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  ByteRangeTracker,
+  createIncomingFileSink,
+  MAX_RAM_FALLBACK_BYTES,
+  checkStorageCapability,
+} from "../lib/opfs";
+import {
+  DEFAULT_ICE_SERVERS,
+  fetchIceServerConfig,
+  fetchIceServers,
+  inspectActiveCandidatePair,
+  getSanitizedConnectionDiagnostic,
+  generateTransferId,
+} from "../lib/webrtc";
+
+// ---------------------------------------------------------------------------
+// 1. ByteRangeTracker Tests: Gap Detection, Duplicates, & Range Coalescing
+// ---------------------------------------------------------------------------
+
+test("ByteRangeTracker: contiguous sequential chunks coalesce to complete status", () => {
+  const tracker = new ByteRangeTracker(1000);
+  assert.equal(tracker.isComplete(), false);
+
+  const res1 = tracker.addRange(0, 400);
+  assert.equal(res1.isDuplicate, false);
+  assert.equal(res1.isOutOfBounds, false);
+  assert.equal(tracker.isComplete(), false);
+  assert.equal(tracker.getTotalBytesReceived(), 400);
+
+  const res2 = tracker.addRange(400, 600);
+  assert.equal(res2.isDuplicate, false);
+  assert.equal(res2.isOutOfBounds, false);
+  assert.equal(tracker.isComplete(), true);
+  assert.equal(tracker.getTotalBytesReceived(), 1000);
+  assert.deepEqual(tracker.getMissingRanges(), []);
+});
+
+test("ByteRangeTracker: detects missing gaps and out-of-order chunks correctly", () => {
+  const tracker = new ByteRangeTracker(1000);
+
+  // Chunk 1 at offset 0 (len 300) -> [0..300)
+  tracker.addRange(0, 300);
+  // Chunk 3 at offset 700 (len 300) -> [700..1000) (Chunk 2 at 300..700 is missing!)
+  tracker.addRange(700, 300);
+
+  assert.equal(tracker.isComplete(), false);
+  assert.equal(tracker.getTotalBytesReceived(), 600);
+
+  const missing = tracker.getMissingRanges();
+  assert.equal(missing.length, 1);
+  assert.deepEqual(missing[0], { start: 300, end: 700 });
+
+  // Now Chunk 2 arrives out-of-order -> completes the stream!
+  const resMid = tracker.addRange(300, 400);
+  assert.equal(resMid.isDuplicate, false);
+  assert.equal(tracker.isComplete(), true);
+  assert.equal(tracker.getTotalBytesReceived(), 1000);
+  assert.deepEqual(tracker.getMissingRanges(), []);
+});
+
+test("ByteRangeTracker: handles duplicate, overlapping, and out-of-bounds chunks safely", () => {
+  const tracker = new ByteRangeTracker(1000);
+  tracker.addRange(0, 500);
+
+  // Exact duplicate
+  const dup = tracker.addRange(0, 500);
+  assert.equal(dup.isDuplicate, true);
+
+  // Sub-range duplicate
+  const subDup = tracker.addRange(100, 200);
+  assert.equal(subDup.isDuplicate, true);
+
+  // Overlapping chunk [400..800)
+  const overlap = tracker.addRange(400, 400);
+  assert.equal(overlap.isDuplicate, false);
+  assert.equal(tracker.getTotalBytesReceived(), 800);
+
+  // Out of bounds chunk [800..1200) -> end 1200 exceeds 1000
+  const oob = tracker.addRange(800, 400);
+  assert.equal(oob.isOutOfBounds, true);
+
+  // Negative offset
+  const neg = tracker.addRange(-10, 100);
+  assert.equal(neg.isOutOfBounds, true);
+
+  // Final valid chunk to complete
+  tracker.addRange(800, 200);
+  assert.equal(tracker.isComplete(), true);
+});
+
+// ---------------------------------------------------------------------------
+// 2. Artificial Truncation Defense & Bounded RAM Fallback
+// ---------------------------------------------------------------------------
+
+test("Integrity: Incomplete transfer ending early fails and is NOT artificially extended", async () => {
+  const fileId = generateTransferId();
+  const advertisedSize = 10 * 1024 * 1024; // 10 MB
+  const actualSentBytes = 2 * 1024 * 1024; // Only 2 MB sent
+
+  const sink = await createIncomingFileSink(
+    "test-truncation",
+    fileId,
+    "truncated.bin",
+    "application/octet-stream",
+    advertisedSize,
+  );
+
+  // Send only 2 MB
+  const chunk = new Uint8Array(actualSentBytes).fill(0xaa);
+  await sink.write(chunk.buffer, 0);
+
+  // Finalizing when only 2 MB of 10 MB arrived MUST fail with missing range error
+  await assert.rejects(
+    async () => {
+      await sink.close();
+    },
+    (err: Error) => {
+      return (
+        err.message.includes("Transferred byte length mismatch") &&
+        err.message.includes("missing byte ranges") &&
+        err.message.includes("Expected 10485760 bytes, received 2097152 bytes")
+      );
+    },
+  );
+});
+
+test("RAM Fallback: Rejects transfers exceeding 100 MB when OPFS is unavailable", async () => {
+  const fileId = generateTransferId();
+  const hugeSize = 105 * 1024 * 1024; // 105 MB
+
+  await assert.rejects(
+    async () => {
+      await createIncomingFileSink("test-ram-limit", fileId, "huge.iso", "application/octet-stream", hugeSize);
+    },
+    /Direct-to-disk streaming \(OPFS\) is unavailable in this browser.*capped at 100 MB/,
+  );
+});
+
+test("RAM Fallback: Allows files under 100 MB and verifies full contiguous content", async () => {
+  const fileId = generateTransferId();
+  const testSize = 256 * 1024; // 256 KB
+  const sink = await createIncomingFileSink("test-ram-ok", fileId, "document.pdf", "application/pdf", testSize);
+
+  const half = testSize / 2;
+  const chunk1 = new Uint8Array(half).fill(1).buffer;
+  const chunk2 = new Uint8Array(half).fill(2).buffer;
+
+  await sink.write(chunk1, 0);
+  await sink.write(chunk2, half);
+
+  const file = await sink.close();
+  assert.equal(file.size, testSize);
+  assert.equal(file.name, "document.pdf");
+  assert.equal(file.type, "application/pdf");
+});
+
+// ---------------------------------------------------------------------------
+// 3. Mock OPFS Direct-to-Disk Streaming (> 100 MB Support & Quota)
+// ---------------------------------------------------------------------------
+
+function installMockOpfs(options?: {
+  freeSpaceBytes?: number;
+  failOnWrite?: boolean;
+}) {
+  const freeSpace = options?.freeSpaceBytes ?? 500 * 1024 * 1024 * 1024; // 500 GB default free
+  const storedFiles = new Map<string, { buffer: Uint8Array; size: number }>();
+
+  const mockFileHandle = (name: string) => {
+    let internalBuffer = new Uint8Array(0);
+    return {
+      getFile: async () => {
+        const stored = storedFiles.get(name) || { buffer: internalBuffer, size: internalBuffer.length };
+        return new File([stored.buffer.slice(0, stored.size)], name);
+      },
+      createWritable: async () => {
+        let cursor = 0;
+        let closed = false;
+        return {
+          seek: async (pos: number) => {
+            cursor = pos;
+          },
+          truncate: async (size: number) => {
+            if (size > internalBuffer.length) {
+              const next = new Uint8Array(size);
+              next.set(internalBuffer, 0);
+              internalBuffer = next;
+            } else {
+              internalBuffer = internalBuffer.slice(0, size);
+            }
+          },
+          write: async (chunk: ArrayBuffer) => {
+            if (options?.failOnWrite) {
+              const err = new Error("Storage quota exceeded");
+              err.name = "QuotaExceededError";
+              throw err;
+            }
+            const src = new Uint8Array(chunk);
+            if (cursor + src.length > internalBuffer.length) {
+              const next = new Uint8Array(cursor + src.length);
+              next.set(internalBuffer, 0);
+              internalBuffer = next;
+            }
+            internalBuffer.set(src, cursor);
+            cursor += src.length;
+          },
+          close: async () => {
+            closed = true;
+            storedFiles.set(name, { buffer: internalBuffer, size: internalBuffer.length });
+          },
+          abort: async () => {
+            closed = true;
+            storedFiles.delete(name);
+          },
+        };
+      },
+    };
+  };
+
+  const mockDirHandle = {
+    getFileHandle: async (name: string) => mockFileHandle(name),
+    removeEntry: async (name: string) => {
+      storedFiles.delete(name);
+    },
+  };
+
+  const mockRootHandle = {
+    getDirectoryHandle: async () => mockDirHandle,
+  };
+
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const originalWindow = (globalThis as any).window;
+
+  (globalThis as any).window = {};
+  Object.defineProperty(globalThis, "navigator", {
+    value: {
+      storage: {
+        getDirectory: async () => mockRootHandle,
+        estimate: async () => ({
+          quota: freeSpace * 2,
+          usage: freeSpace,
+        }),
+      },
+    },
+    configurable: true,
+    writable: true,
+  });
+
+  return () => {
+    if (originalNavigator) {
+      Object.defineProperty(globalThis, "navigator", originalNavigator);
+    }
+    (globalThis as any).window = originalWindow;
+  };
+}
+
+test("OPFS: Streams files > 100 MB directly to disk without RAM exhaustion", async () => {
+  const uninstall = installMockOpfs();
+  try {
+    const fileId = generateTransferId();
+    const largeSize = 120 * 1024 * 1024; // 120 MB (exceeds MAX_RAM_FALLBACK_BYTES)
+
+    const sink = await createIncomingFileSink(
+      "test-large-opfs",
+      fileId,
+      "large_dataset.bin",
+      "application/octet-stream",
+      largeSize,
+    );
+
+    // Stream in two 60 MB chunks
+    const chunkSize = 60 * 1024 * 1024;
+    const chunkA = new Uint8Array(chunkSize).fill(0x11).buffer;
+    const chunkB = new Uint8Array(chunkSize).fill(0x22).buffer;
+
+    await sink.write(chunkA, 0);
+    await sink.write(chunkB, chunkSize);
+
+    assert.equal(sink.getBytesWritten(), largeSize);
+    assert.equal(sink.isComplete(), true);
+
+    const file = await sink.close();
+    assert.equal(file.size, largeSize);
+    assert.equal(file.name, "large_dataset.bin");
+  } finally {
+    uninstall();
+  }
+});
+
+test("OPFS: Storage quota check fails before transfer when device space is insufficient", async () => {
+  // Only 50 MB free on device
+  const uninstall = installMockOpfs({ freeSpaceBytes: 50 * 1024 * 1024 });
+  try {
+    const fileId = generateTransferId();
+    const neededSize = 100 * 1024 * 1024; // 100 MB requested
+
+    await assert.rejects(
+      async () => {
+        await createIncomingFileSink("test-quota", fileId, "big.zip", "application/zip", neededSize);
+      },
+      /Insufficient storage space: incoming file requires 100 MB, but device has only 50 MB available/,
+    );
+  } finally {
+    uninstall();
+  }
+});
+
+test("OPFS: In-flight disk write failure (QuotaExceededError) triggers safe abort and cleanup", async () => {
+  const uninstall = installMockOpfs({ failOnWrite: true });
+  try {
+    const fileId = generateTransferId();
+    const sink = await createIncomingFileSink("test-exhaustion", fileId, "data.bin", "application/octet-stream", 1024);
+
+    await assert.rejects(
+      async () => {
+        await sink.write(new Uint8Array(512).buffer, 0);
+      },
+      /Disk write failed: Storage quota exceeded/,
+    );
+
+    // Verify abort can be called cleanly
+    await sink.abort();
+  } finally {
+    uninstall();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 4. Reliable TURN Configuration & Candidate Pair Diagnostics
+// ---------------------------------------------------------------------------
+
+test("TURN Config: DEFAULT_ICE_SERVERS does not contain hardcoded public example credentials", () => {
+  for (const s of DEFAULT_ICE_SERVERS) {
+    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+    for (const u of urls) {
+      assert.ok(
+        !u.includes("openrelay.metered.ca"),
+        "Must not depend on hardcoded public openrelay example in production fallback",
+      );
+      assert.ok(
+        !u.includes("numb.viagenie.ca"),
+        "Must not depend on deprecated public example TURN endpoints",
+      );
+    }
+    // Verify no hardcoded credentials
+    assert.equal(s.username, undefined);
+    assert.equal(s.credential, undefined);
+  }
+});
+
+test("TURN Config: fetchIceServerConfig identifies default STUN vs authenticated TURN", async () => {
+  // Test fallback in Node environment where fetch to /api/signal/ice-servers fails
+  const config = await fetchIceServerConfig();
+  assert.equal(config.turnConfigured, false);
+  assert.equal(config.source, "default-stun");
+  assert.ok(Array.isArray(config.iceServers));
+  assert.ok(config.iceServers.length > 0);
+
+  // Backward compatible fetchIceServers returns matching array
+  const servers = await fetchIceServers();
+  assert.deepEqual(servers, config.iceServers);
+});
+
+test("Diagnostics: inspectActiveCandidatePair identifies direct P2P vs TURN Relay paths", async () => {
+  // Mock RTCPeerConnection with direct P2P candidate pair (srflx <-> srflx)
+  const directStats = new Map<string, any>([
+    [
+      "cp1",
+      {
+        type: "candidate-pair",
+        selected: true,
+        localCandidateId: "c1",
+        remoteCandidateId: "c2",
+      },
+    ],
+    ["c1", { id: "c1", candidateType: "srflx", protocol: "udp" }],
+    ["c2", { id: "c2", candidateType: "srflx", protocol: "udp" }],
+  ]);
+
+  const mockDirectPc = {
+    getStats: async () => directStats,
+  } as unknown as RTCPeerConnection;
+
+  const directPair = await inspectActiveCandidatePair(mockDirectPc);
+  assert.ok(directPair);
+  assert.equal(directPair!.isRelayed, false);
+  assert.equal(directPair!.localCandidateType, "srflx");
+  assert.equal(directPair!.remoteCandidateType, "srflx");
+
+  const directDiag = getSanitizedConnectionDiagnostic("connected", "connected", false, directPair);
+  assert.equal(directDiag, "Connected via Direct P2P (srflx <-> srflx)");
+
+  // Mock RTCPeerConnection with relayed TURN candidate pair (relay <-> relay)
+  const relayStats = new Map<string, any>([
+    [
+      "cp2",
+      {
+        type: "candidate-pair",
+        nominated: true,
+        localCandidateId: "c3",
+        remoteCandidateId: "c4",
+      },
+    ],
+    ["c3", { id: "c3", candidateType: "relay", protocol: "udp" }],
+    ["c4", { id: "c4", candidateType: "relay", protocol: "udp" }],
+  ]);
+
+  const mockRelayPc = {
+    getStats: async () => relayStats,
+  } as unknown as RTCPeerConnection;
+
+  const relayPair = await inspectActiveCandidatePair(mockRelayPc);
+  assert.ok(relayPair);
+  assert.equal(relayPair!.isRelayed, true);
+
+  const relayDiag = getSanitizedConnectionDiagnostic("connected", "connected", true, relayPair);
+  assert.equal(relayDiag, "Connected via TURN Relay (UDP)");
+});
+
+test("Diagnostics: failure diagnostics accurately warn about symmetric NAT when TURN is unconfigured", () => {
+  const diagNoTurn = getSanitizedConnectionDiagnostic("failed", "failed", false, null);
+  assert.ok(diagNoTurn?.includes("Direct P2P connection failed"));
+  assert.ok(diagNoTurn?.includes("Symmetric NAT"));
+  assert.ok(diagNoTurn?.includes("TURN relay must be configured"));
+
+  const diagWithTurn = getSanitizedConnectionDiagnostic("failed", "failed", true, null);
+  assert.ok(diagWithTurn?.includes("P2P and TURN relay connection failed"));
+});

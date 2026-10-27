@@ -74,7 +74,7 @@ function GhostShareContent({ initialCode }: { initialCode?: string }) {
             </span>
             <span>•</span>
             <span className="flex items-center gap-1.5 text-tertiary">
-              <Shield size={14} /> Zero Cloud Storage • Unlimited P2P
+              <Shield size={14} /> Zero Cloud Storage • Direct P2P Transfer
             </span>
           </div>
 

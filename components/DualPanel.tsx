@@ -59,6 +59,8 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     activeReceiving,
     receivedFiles,
     downloadAllFiles,
+    storageCapability,
+    candidatePair,
     pushToast,
   } = useGhostSession();
 
@@ -416,6 +418,11 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-on-surface-variant uppercase border border-white/[0.06]">
                 Code: {code}
               </span>
+              {candidatePair && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-secondary border border-white/[0.06]">
+                  {candidatePair.isRelayed ? "TURN Relay" : `Direct (${candidatePair.localCandidateType})`}
+                </span>
+              )}
             </div>
             <p className="text-[11px] text-on-surface-variant font-mono-telemetry">
               Direct DTLS Encrypted DataChannel • Zero-Server Buffer
@@ -508,7 +515,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               Click to browse or drop files here
             </p>
             <p className="text-[11px] text-on-surface-variant mt-1">
-              Unlimited file size • P2P zero cloud upload
+              Direct P2P transfer • Zero cloud upload (Storage &amp; Quota aware)
             </p>
           </div>
 
@@ -673,6 +680,12 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                       </div>
                     ))}
                   </div>
+
+                  {storageCapability?.available !== undefined && pendingFilesSize > storageCapability.available && (
+                    <p className="text-[10px] text-error font-medium mt-1">
+                      ⚠️ Insufficient space: Requires {formatSize(pendingFilesSize)}, free {formatSize(storageCapability.available)}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -699,7 +712,9 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               <div className="flex items-center justify-between text-xs">
                 <span className="truncate font-medium text-on-surface flex items-center gap-1.5">
                   <Loader2 size={13} className="animate-spin text-secondary" />
-                  Receiving: {activeReceiving.name}
+                  {activeReceiving.status === "verifying"
+                    ? `Verifying: ${activeReceiving.name}`
+                    : `Receiving: ${activeReceiving.name}`}
                 </span>
                 <span className="font-mono-telemetry text-[11px] text-on-surface-variant shrink-0">
                   {formatSize(activeReceiving.receivedBytes)} / {formatSize(activeReceiving.size)}
