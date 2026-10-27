@@ -12,7 +12,8 @@ export const EXPIRY_OPTIONS = [
 export const DEFAULT_TTL_SECONDS = 60 * 60; // 1 hour - used for the waiting room, before a sender picks
 export const MAX_TTL_SECONDS = 24 * 60 * 60;
 
-// Peer-to-peer transfers are unlimited; zero cloud storage quotas apply.
+// Peer-to-peer transfers stream directly without server-side file size caps.
+// Maximum file size depends on browser storage capabilities (OPFS disk space, user-selected file destination, or 100 MB RAM fallback).
 export const MAX_TRANSFER_BYTES = Infinity;
 
 export function isValidTtl(seconds: unknown): seconds is number {

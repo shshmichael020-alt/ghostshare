@@ -25,14 +25,17 @@ import {
 test("WebRTC Constants: CHUNK_SIZE and backpressure thresholds adhere to safe SCTP limits", () => {
   assert.equal(CHUNK_SIZE, 32 * 1024, "Chunk size must be 32 KB for safe SCTP MTU traversal");
   assert.equal(MAX_BUFFERED_AMOUNT, 256 * 1024, "High water mark must be 256 KB");
-  assert.ok(DEFAULT_ICE_SERVERS.length >= 2, "Must configure multiple public STUN and TURN servers");
+  assert.ok(DEFAULT_ICE_SERVERS.length >= 2, "Must configure multiple public STUN servers");
   assert.ok(
-    DEFAULT_ICE_SERVERS.some((s) => typeof s.urls === "string" && s.urls.includes("stun")),
-    "ICE servers must include STUN protocol endpoints",
+    DEFAULT_ICE_SERVERS.every((s) => typeof s.urls === "string" && s.urls.startsWith("stun:")),
+    "Default ICE servers must contain only authenticated/usable STUN endpoints when no TURN relay is configured",
   );
   assert.ok(
-    DEFAULT_ICE_SERVERS.some((s) => Array.isArray(s.urls) && s.urls.some((u) => u.includes("turn"))),
-    "ICE servers must include TURN relay endpoints for mobile CGNAT traversal",
+    !DEFAULT_ICE_SERVERS.some((s) => {
+      const u = Array.isArray(s.urls) ? s.urls : [s.urls];
+      return u.some((url) => typeof url === "string" && (url.startsWith("turn:") || url.startsWith("turns:")));
+    }),
+    "DEFAULT_ICE_SERVERS must not contain unauthenticated TURN endpoints",
   );
 });
 
@@ -175,7 +178,10 @@ test("ICE Server Discovery: fetchIceServers falls back safely to default Anycast
     "ICE servers must contain STUN endpoints",
   );
   assert.ok(
-    servers.some((s) => Array.isArray(s.urls) && s.urls.some((u) => u.includes("turn"))),
-    "ICE servers must support TURN endpoints",
+    !servers.some((s) => {
+      const u = Array.isArray(s.urls) ? s.urls : [s.urls];
+      return u.some((url) => typeof url === "string" && (url.startsWith("turn:") || url.startsWith("turns:")));
+    }),
+    "Fallback ICE servers must not advertise unauthenticated TURN endpoints",
   );
 });

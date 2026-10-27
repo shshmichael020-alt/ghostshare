@@ -28,6 +28,7 @@ import {
   ArrowLeftRight,
   FileCheck,
   Layers,
+  HardDrive,
 } from "lucide-react";
 
 export default function DualPanel({ initialCode }: { initialCode?: string } = {}) {
@@ -55,6 +56,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     retryFailedFile,
     pendingApproval,
     handleAcceptTransfer,
+    handleAcceptWithUserFile,
     handleDeclineTransfer,
     activeReceiving,
     receivedFiles,
@@ -681,15 +683,35 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                     ))}
                   </div>
 
+                  <div className="mt-2 text-[10px] font-mono-telemetry text-on-surface-variant">
+                    Storage: {storageCapability?.isOpfsSupported ? "OPFS Direct-to-Disk" : "RAM Buffer (100 MB max)"}
+                    {storageCapability?.available !== undefined && ` • Free: ${formatSize(storageCapability.available)}`}
+                  </div>
+
                   {storageCapability?.available !== undefined && pendingFilesSize > storageCapability.available && (
                     <p className="text-[10px] text-error font-medium mt-1">
                       ⚠️ Insufficient space: Requires {formatSize(pendingFilesSize)}, free {formatSize(storageCapability.available)}
                     </p>
                   )}
+
+                  {!storageCapability?.isOpfsSupported && pendingApproval.files.some((f) => f.size > 100 * 1024 * 1024) && (
+                    <p className="text-[10px] text-amber-300 font-medium mt-1">
+                      ⚠️ Files &gt; 100 MB require OPFS or destination file selection.
+                    </p>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 pt-1">
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                {storageCapability?.isFileSystemAccessSupported && (
+                  <button
+                    onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile()}
+                    className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-white/[0.12] text-on-surface text-xs font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                    title="Select destination file on disk"
+                  >
+                    <HardDrive size={13} className="text-secondary" /> Save To File...
+                  </button>
+                )}
                 <button
                   onClick={handleAcceptTransfer}
                   className="flex-1 py-2 px-3 rounded-xl bg-secondary text-on-secondary font-medium text-xs hover:bg-secondary/90 transition-colors cursor-pointer flex items-center justify-center gap-1.5"

@@ -39,6 +39,7 @@ import {
   OpfsFileStreamer,
   checkStorageCapability,
   StorageCapability,
+  promptUserSaveFileHandle,
 } from "@/lib/opfs";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
@@ -130,6 +131,7 @@ export interface SessionContextType {
   // Inbound transfer (Receive)
   pendingApproval: PendingInboundApproval | null;
   handleAcceptTransfer: () => void;
+  handleAcceptWithUserFile?: (fileId?: string) => Promise<boolean>;
   handleDeclineTransfer: () => void;
   activeReceiving: ActiveReceivingItem | null;
   receivedFiles: ReceivedFileItem[];
@@ -236,6 +238,7 @@ export function SessionProvider({
     >
   >(new Map());
   const pendingChunksRef = useRef<Map<string, { payload: ArrayBuffer; offset?: number }[]>>(new Map());
+  const userFileHandlesRef = useRef<Map<string, FileSystemFileHandle>>(new Map());
 
   // Ephemeral Live Chat (In-memory ONLY)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -444,6 +447,7 @@ export function SessionProvider({
           }
 
           try {
+            const userFileHandle = userFileHandlesRef.current.get(fileId);
             const streamer = await createIncomingFileSink(
               activeCode,
               fileId,
@@ -451,6 +455,7 @@ export function SessionProvider({
               safeMime,
               safeSize,
               startOffset,
+              userFileHandle ? { userFileHandle } : undefined,
             );
 
             const sinkEntry = {
@@ -1550,7 +1555,32 @@ export function SessionProvider({
     setPendingApproval(null);
   }, [pendingApproval, pushToast]);
 
+  const handleAcceptWithUserFile = useCallback(
+    async (targetFileId?: string): Promise<boolean> => {
+      if (!pendingApproval || pendingApproval.files.length === 0) return false;
+      const targetFile = targetFileId
+        ? pendingApproval.files.find((f) => f.id === targetFileId)
+        : pendingApproval.files[0];
+      if (!targetFile) return false;
+
+      try {
+        const handle = await promptUserSaveFileHandle(targetFile.name);
+        if (!handle) {
+          return false;
+        }
+        userFileHandlesRef.current.set(targetFile.id, handle);
+        handleAcceptTransfer();
+        return true;
+      } catch (err) {
+        pushToast(`Could not select destination file: ${(err as Error).message}`, "error");
+        return false;
+      }
+    },
+    [pendingApproval, handleAcceptTransfer, pushToast],
+  );
+
   const handleDeclineTransfer = useCallback(() => {
+    userFileHandlesRef.current.clear();
     const ctrl = dcControlRef.current;
     if (ctrl && ctrl.readyState === "open") {
       const declineMsg: WebRTCMessage = {
@@ -1779,6 +1809,7 @@ export function SessionProvider({
         retryFailedFile,
         pendingApproval,
         handleAcceptTransfer,
+        handleAcceptWithUserFile,
         handleDeclineTransfer,
         activeReceiving,
         receivedFiles,

@@ -28,6 +28,38 @@ export class ByteRangeTracker {
     }
   }
 
+  /**
+   * Validates a chunk against expected bounds, duplicates, and partial overlaps
+   * WITHOUT committing it to the received range list.
+   */
+  validateChunk(offset: number, length: number): {
+    isDuplicate: boolean;
+    isOutOfBounds: boolean;
+    isConflictingOverlap: boolean;
+  } {
+    if (length === 0) {
+      return { isDuplicate: false, isOutOfBounds: false, isConflictingOverlap: false };
+    }
+    const start = offset;
+    const end = offset + length;
+
+    if (start < 0 || end > this.expectedSize) {
+      return { isDuplicate: false, isOutOfBounds: true, isConflictingOverlap: false };
+    }
+
+    for (const r of this.ranges) {
+      if (start >= r.start && end <= r.end) {
+        return { isDuplicate: true, isOutOfBounds: false, isConflictingOverlap: false };
+      }
+      // Partial overlap without being fully contained is conflicting
+      if ((start < r.end && end > r.end) || (start < r.start && end > r.start)) {
+        return { isDuplicate: false, isOutOfBounds: false, isConflictingOverlap: true };
+      }
+    }
+
+    return { isDuplicate: false, isOutOfBounds: false, isConflictingOverlap: false };
+  }
+
   addRange(offset: number, length: number): { isDuplicate: boolean; isOutOfBounds: boolean } {
     if (length === 0) {
       return { isDuplicate: false, isOutOfBounds: false };
@@ -134,6 +166,38 @@ export function isFileSystemAccessSupported(): boolean {
     typeof window !== "undefined" &&
     typeof (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker === "function"
   );
+}
+
+/**
+ * Prompts user to select a destination file using the File System Access API.
+ * Returns the selected FileSystemFileHandle, or null if cancelled / unsupported.
+ */
+export async function promptUserSaveFileHandle(suggestedName: string): Promise<FileSystemFileHandle | null> {
+  if (!isFileSystemAccessSupported()) return null;
+  try {
+    const ext = suggestedName.includes(".") ? suggestedName.slice(suggestedName.lastIndexOf(".")) : "";
+    const options: Record<string, unknown> = {
+      suggestedName,
+    };
+    if (ext) {
+      options.types = [
+        {
+          description: "Incoming File",
+          accept: { "application/octet-stream": [ext] },
+        },
+      ];
+    }
+    const showSave = (window as unknown as { showSaveFilePicker: (opts?: unknown) => Promise<FileSystemFileHandle> })
+      .showSaveFilePicker;
+    return await showSave(options);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") {
+      // User cancelled picker - safe
+      return null;
+    }
+    console.warn("User file destination selection error:", err);
+    throw err;
+  }
 }
 
 /**
@@ -270,48 +334,76 @@ export async function createIncomingFileSink(
         let writeChain: Promise<void> = Promise.resolve();
         let closePromise: Promise<File> | null = null;
         let isAborted = false;
+        let terminalWriteError: Error | null = null;
 
         return {
           write: async (chunk: ArrayBuffer, offset?: number) => {
             if (isAborted) throw new Error("Stream has been aborted");
-            const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
-            const check = rangeTracker.addRange(chunkOffset, chunk.byteLength);
+            if (terminalWriteError) throw terminalWriteError;
 
-            if (check.isOutOfBounds) {
+            const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
+            const validation = rangeTracker.validateChunk(chunkOffset, chunk.byteLength);
+
+            if (validation.isOutOfBounds) {
               throw new Error(
                 `Chunk range [${chunkOffset}..${chunkOffset + chunk.byteLength}) exceeds expected size ${expectedSize}`,
               );
             }
-            if (check.isDuplicate) {
+            if (validation.isConflictingOverlap) {
+              throw new Error(
+                `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunk.byteLength}`,
+              );
+            }
+            if (validation.isDuplicate) {
               // Deduplicate already received chunk range
               return;
             }
 
-            writeChain = writeChain.catch(() => {}).then(async () => {
-              if (isAborted) return;
+            writeChain = writeChain.then(async () => {
+              if (isAborted) throw new Error("Stream has been aborted");
+              if (terminalWriteError) throw terminalWriteError;
+
               try {
                 if (typeof offset === "number") {
                   await writable.seek(offset);
                 }
                 await writable.write(chunk);
                 bytesWritten += chunk.byteLength;
+                // Count chunk as received ONLY after write succeeds
+                rangeTracker.addRange(chunkOffset, chunk.byteLength);
               } catch (writeErr) {
+                const message = (writeErr as Error).message || "Storage quota exceeded";
+                terminalWriteError = new Error(`Disk write failed: ${message}`);
                 console.error("OPFS disk write failed (disk full or quota exceeded):", writeErr);
-                throw new Error(`Disk write failed: ${(writeErr as Error).message || "Storage quota exceeded"}`);
+                try {
+                  if (typeof writable.abort === "function") {
+                    await writable.abort();
+                  } else {
+                    await writable.close();
+                  }
+                } catch {}
+                throw terminalWriteError;
               }
             });
             await writeChain;
           },
           close: async () => {
             if (isAborted) throw new Error("Stream has been aborted");
+            if (terminalWriteError) throw terminalWriteError;
             if (closePromise) return closePromise;
             closePromise = (async () => {
               await writeChain;
+              if (terminalWriteError) throw terminalWriteError;
 
               // Strict completeness check: verify all ranges arrived WITHOUT artificial truncation
               if (!rangeTracker.isComplete()) {
                 const missing = rangeTracker.getMissingRanges();
                 const missingStr = missing.map((m) => `[${m.start}..${m.end})`).join(", ");
+                try {
+                  if (typeof writable.abort === "function") {
+                    await writable.abort();
+                  }
+                } catch {}
                 throw new Error(
                   `Transferred byte length mismatch: missing byte ranges: ${missingStr}. Expected ${expectedSize} bytes, received ${rangeTracker.getTotalBytesReceived()} bytes.`,
                 );
@@ -378,32 +470,49 @@ export async function createIncomingFileSink(
   let bytesWritten = startOffset;
   let fallbackWriteChain: Promise<void> = Promise.resolve();
   let isAborted = false;
+  let terminalRamError: Error | null = null;
 
   return {
     write: async (chunk: ArrayBuffer, offset?: number) => {
       if (isAborted || !memoryBuffer) throw new Error("Stream has been aborted");
-      const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
-      const check = rangeTracker.addRange(chunkOffset, chunk.byteLength);
+      if (terminalRamError) throw terminalRamError;
 
-      if (check.isOutOfBounds) {
+      const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
+      const validation = rangeTracker.validateChunk(chunkOffset, chunk.byteLength);
+
+      if (validation.isOutOfBounds) {
         throw new Error(
           `Chunk range [${chunkOffset}..${chunkOffset + chunk.byteLength}) exceeds expected size ${expectedSize}`,
         );
       }
-      if (check.isDuplicate) {
+      if (validation.isConflictingOverlap) {
+        throw new Error(
+          `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunk.byteLength}`,
+        );
+      }
+      if (validation.isDuplicate) {
         return;
       }
 
-      fallbackWriteChain = fallbackWriteChain.catch(() => {}).then(async () => {
-        if (isAborted || !memoryBuffer) return;
-        memoryBuffer.set(new Uint8Array(chunk), chunkOffset);
-        bytesWritten += chunk.byteLength;
+      fallbackWriteChain = fallbackWriteChain.then(async () => {
+        if (isAborted || !memoryBuffer) throw new Error("Stream has been aborted");
+        if (terminalRamError) throw terminalRamError;
+        try {
+          memoryBuffer.set(new Uint8Array(chunk), chunkOffset);
+          bytesWritten += chunk.byteLength;
+          rangeTracker.addRange(chunkOffset, chunk.byteLength);
+        } catch (err) {
+          terminalRamError = err instanceof Error ? err : new Error(String(err));
+          throw terminalRamError;
+        }
       });
       await fallbackWriteChain;
     },
     close: async () => {
       if (isAborted || !memoryBuffer) throw new Error("Stream has been aborted");
+      if (terminalRamError) throw terminalRamError;
       await fallbackWriteChain;
+      if (terminalRamError) throw terminalRamError;
 
       if (!rangeTracker.isComplete()) {
         const missing = rangeTracker.getMissingRanges();

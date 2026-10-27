@@ -84,40 +84,36 @@ export default {
       });
     }
 
-    // Fast-path /api/signal/ice-servers directly from Cloudflare Worker env secrets
+    // Fast-path /api/signal/ice-servers directly from Cloudflare Worker env secrets when TURN_SERVERS_JSON is present
     if (url.pathname === "/api/signal/ice-servers") {
       const turnServersJson = env.TURN_SERVERS_JSON as string | undefined;
-      let iceServers = DEFAULT_STUN_SERVERS;
-      let turnConfigured = false;
-      let source = "default-stun";
 
       if (turnServersJson) {
         try {
-          const parsed = JSON.parse(turnServersJson);
+          const cleanJson = turnServersJson.trim().replace(/^\uFEFF/, "");
+          const parsed = JSON.parse(cleanJson);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            iceServers = [...DEFAULT_STUN_SERVERS, ...parsed];
-            turnConfigured = true;
-            source = "worker-turn-secret";
+            const res = new Response(
+              JSON.stringify({
+                iceServers: [...DEFAULT_STUN_SERVERS, ...parsed],
+                turnConfigured: true,
+                source: "worker-turn-secret",
+              }),
+              {
+                headers: {
+                  "Content-Type": "application/json",
+                  "Cache-Control": "no-store, no-cache, must-revalidate",
+                },
+              },
+            );
+            return applySecurityHeaders(res, origin, allowed);
           }
         } catch (err) {
           console.error("Failed to parse TURN_SERVERS_JSON in worker:", err);
         }
       }
-
-      const res = new Response(
-        JSON.stringify({
-          iceServers,
-          turnConfigured,
-          source,
-        }),
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-          },
-        },
-      );
-      return applySecurityHeaders(res, origin, allowed);
+      // If TURN_SERVERS_JSON is not configured, fall through to OpenNext handler
+      // which checks CLOUDFLARE_TURN_KEY_ID / METERED_API_KEY or defaults to STUN
     }
 
     const openNextRes = await openNextHandler.fetch(request, env, ctx);

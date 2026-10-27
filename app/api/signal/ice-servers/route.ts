@@ -33,13 +33,21 @@ export async function GET() {
     }
   } catch {}
 
-  const cfTurnKeyId = env.CLOUDFLARE_TURN_KEY_ID || process.env.CLOUDFLARE_TURN_KEY_ID;
-  const cfTurnApiToken = env.CLOUDFLARE_TURN_API_TOKEN || process.env.CLOUDFLARE_TURN_API_TOKEN;
+  const cfTurnKeyId =
+    env.CLOUDFLARE_TURN_KEY_ID ||
+    process.env.CLOUDFLARE_TURN_KEY_ID ||
+    env.TURN_KEY_ID ||
+    process.env.TURN_KEY_ID;
+  const cfTurnApiToken =
+    env.CLOUDFLARE_TURN_API_TOKEN ||
+    process.env.CLOUDFLARE_TURN_API_TOKEN ||
+    env.TURN_KEY_API_TOKEN ||
+    process.env.TURN_KEY_API_TOKEN;
   const meteredApiKey = env.METERED_API_KEY || process.env.METERED_API_KEY;
   const meteredAppName = env.METERED_APP_NAME || process.env.METERED_APP_NAME;
   const turnServersJson = env.TURN_SERVERS_JSON || process.env.TURN_SERVERS_JSON;
 
-  // Option 1: Cloudflare Calls Managed TURN Service (1,000 GB / 1 TB per month free)
+  // Option 1: Cloudflare Realtime TURN Service (1,000 GB / 1 TB per month free allowance)
   if (cfTurnKeyId && cfTurnApiToken) {
     try {
       const controller = new AbortController();
@@ -61,8 +69,22 @@ export async function GET() {
       if (res.ok) {
         const data = (await res.json()) as { iceServers?: RTCIceServer[] };
         if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-          cachedIceServers = [...DEFAULT_STUN_SERVERS, ...data.iceServers];
-          cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours
+          // Filter out port 53 if returned by upstream (browsers reject port 53)
+          const sanitizedServers = data.iceServers
+            .map((s) => {
+              if (Array.isArray(s.urls)) {
+                const filtered = s.urls.filter((u) => !u.includes(":53?") && !u.endsWith(":53"));
+                return { ...s, urls: filtered };
+              }
+              if (typeof s.urls === "string" && (s.urls.includes(":53?") || s.urls.endsWith(":53"))) {
+                return null;
+              }
+              return s;
+            })
+            .filter(Boolean) as RTCIceServer[];
+
+          cachedIceServers = [...DEFAULT_STUN_SERVERS, ...sanitizedServers];
+          cacheExpiresAt = now + 12 * 60 * 60 * 1000; // Cache 12 hours (well within 24h TTL)
           return NextResponse.json({
             iceServers: cachedIceServers,
             turnConfigured: true,
@@ -71,7 +93,7 @@ export async function GET() {
         }
       }
     } catch (cfErr) {
-      console.warn("Cloudflare Calls TURN dynamic credential error:", cfErr);
+      console.warn("Cloudflare Realtime TURN dynamic credential error:", cfErr);
     }
   }
 

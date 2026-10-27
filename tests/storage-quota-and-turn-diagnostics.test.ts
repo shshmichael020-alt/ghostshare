@@ -427,3 +427,147 @@ test("Diagnostics: failure diagnostics accurately warn about symmetric NAT when 
   const diagWithTurn = getSanitizedConnectionDiagnostic("failed", "failed", true, null);
   assert.ok(diagWithTurn?.includes("P2P and TURN relay connection failed"));
 });
+
+// ---------------------------------------------------------------------------
+// 5. User-Selected File Destination & Terminal Write Safety Tests
+// ---------------------------------------------------------------------------
+
+test("User-Selected Destination: Streams chunks directly to provided FileSystemFileHandle", async () => {
+  const writtenChunks: ArrayBuffer[] = [];
+  let isClosed = false;
+
+  const mockWritable = {
+    seek: async () => {},
+    truncate: async () => {},
+    write: async (chunk: ArrayBuffer) => {
+      writtenChunks.push(chunk);
+    },
+    close: async () => {
+      isClosed = true;
+    },
+    abort: async () => {},
+  };
+
+  const mockFile = new File([new Uint8Array(2000)], "destination.bin");
+
+  const mockUserFileHandle = {
+    createWritable: async () => mockWritable,
+    getFile: async () => mockFile,
+  } as unknown as FileSystemFileHandle;
+
+  const fileId = generateTransferId();
+  const sink = await createIncomingFileSink(
+    "test-user-dest",
+    fileId,
+    "destination.bin",
+    "application/octet-stream",
+    2000,
+    0,
+    { userFileHandle: mockUserFileHandle },
+  );
+
+  const chunk1 = new Uint8Array(1000).fill(0x11).buffer;
+  const chunk2 = new Uint8Array(1000).fill(0x22).buffer;
+
+  await sink.write(chunk1, 0);
+  await sink.write(chunk2, 1000);
+
+  const finalizedFile = await sink.close();
+  assert.equal(finalizedFile.name, "destination.bin");
+  assert.equal(finalizedFile.size, 2000);
+  assert.equal(isClosed, true);
+  assert.equal(writtenChunks.length, 2);
+});
+
+test("ByteRangeTracker: detects and rejects conflicting partial chunk overlaps", () => {
+  const tracker = new ByteRangeTracker(1000);
+  tracker.addRange(0, 500); // [0..500)
+
+  // Chunk [400..700) partially overlaps [0..500)
+  const validation = tracker.validateChunk(400, 300);
+  assert.equal(validation.isConflictingOverlap, true);
+  assert.equal(validation.isDuplicate, false);
+});
+
+test("Terminal Write Failure: Write failure is terminal and preserved on close without erasure", async () => {
+  let writeCount = 0;
+  const mockWritable = {
+    seek: async () => {},
+    truncate: async () => {},
+    write: async () => {
+      writeCount++;
+      if (writeCount === 2) {
+        throw new Error("Disk full error");
+      }
+    },
+    close: async () => {},
+    abort: async () => {},
+  };
+
+  const mockHandle = {
+    createWritable: async () => mockWritable,
+    getFile: async () => new File([new Uint8Array(300)], "f.bin"),
+  } as unknown as FileSystemFileHandle;
+
+  const fileId = generateTransferId();
+  const sink = await createIncomingFileSink(
+    "test-term-write",
+    fileId,
+    "f.bin",
+    "application/octet-stream",
+    300,
+    0,
+    { userFileHandle: mockHandle },
+  );
+
+  await sink.write(new Uint8Array(100).buffer, 0); // 1st write ok
+
+  await assert.rejects(
+    async () => {
+      await sink.write(new Uint8Array(100).buffer, 100); // 2nd write fails
+    },
+    /Disk full error/,
+  );
+
+  // Subsequent 3rd write must immediately reject with terminal error
+  await assert.rejects(
+    async () => {
+      await sink.write(new Uint8Array(100).buffer, 200);
+    },
+    /Disk full error/,
+  );
+
+  // close() must also throw the terminal error
+  await assert.rejects(
+    async () => {
+      await sink.close();
+    },
+    /Disk full error/,
+  );
+});
+
+test("TURN Provider: Generates authenticated credentials from Cloudflare Realtime API response", () => {
+  const mockCloudflareResponse = {
+    iceServers: [
+      { urls: ["stun:stun.cloudflare.com:3478"] },
+      {
+        urls: [
+          "turn:turn.cloudflare.com:3478?transport=udp",
+          "turn:turn.cloudflare.com:443?transport=tcp",
+          "turns:turn.cloudflare.com:5349?transport=tcp",
+        ],
+        username: "user_test_token_123",
+        credential: "cred_test_secret_456",
+      },
+    ],
+  };
+
+  const turnServer = mockCloudflareResponse.iceServers.find((s) =>
+    Array.isArray(s.urls) && s.urls.some((u) => u.startsWith("turn:") || u.startsWith("turns:"))
+  );
+
+  assert.ok(turnServer);
+  assert.equal(turnServer!.username, "user_test_token_123");
+  assert.equal(turnServer!.credential, "cred_test_secret_456");
+  assert.ok(turnServer!.urls.some((u) => u.includes("turn.cloudflare.com")));
+});

@@ -48,6 +48,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     shareLink,
     pendingApproval,
     handleAcceptTransfer,
+    handleAcceptWithUserFile,
     handleDeclineTransfer,
     activeReceiving,
     receivedFiles,
@@ -214,26 +215,53 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             ))}
           </div>
 
-          {/* Storage Capability & Quota Details */}
+          {/* Storage Capability & Quota Preflight Details */}
           {(() => {
             const batchTotal = pendingApproval.files.reduce((acc, f) => acc + f.size, 0);
-            const isQuotaExceeded = storageCapability?.available !== undefined && batchTotal > storageCapability.available;
+            const isQuotaExceeded =
+              storageCapability?.available !== undefined && batchTotal > storageCapability.available;
+            const hasLargeFile = pendingApproval.files.some((f) => f.size > 100 * 1024 * 1024);
+            const isRamFallback = !storageCapability?.isOpfsSupported;
+            const canSelectDestination = Boolean(storageCapability?.isFileSystemAccessSupported);
+
+            let engineLabel = "OPFS Direct-to-Disk (Streams up to free disk quota)";
+            if (isRamFallback) {
+              engineLabel = canSelectDestination
+                ? "User-Selected Destination or RAM Buffer (100 MB max)"
+                : "RAM Buffer (Capped at 100 MB max)";
+            }
+
             return (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between text-xs text-on-surface-variant font-mono-telemetry bg-surface-container/60 p-2.5 rounded-lg border border-white/[0.04]">
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between text-xs text-on-surface-variant font-mono-telemetry bg-surface-container/60 p-2.5 rounded-lg border border-white/[0.04] gap-2">
                   <span className="flex items-center gap-1.5">
                     <HardDrive size={13} className="text-secondary" />
-                    Storage: {storageCapability?.isOpfsSupported ? "OPFS Direct-to-Disk" : "RAM Buffer (100 MB max)"}
+                    Storage Engine: <strong className="text-on-surface">{engineLabel}</strong>
                   </span>
                   {storageCapability?.available !== undefined && (
-                    <span>Device Free: {formatSize(storageCapability.available)}</span>
+                    <span>Estimated Device Free: {formatSize(storageCapability.available)}</span>
                   )}
                 </div>
+
+                {isRamFallback && hasLargeFile && (
+                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 flex items-start gap-2.5 text-xs">
+                    <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                    <div className="flex flex-col gap-1">
+                      <span className="font-semibold">Large File Detected (&gt; 100 MB) without OPFS</span>
+                      <p className="text-on-surface-variant">
+                        {canSelectDestination
+                          ? "This browser does not support OPFS background disk streaming. Please click 'Save to Specific File...' below to stream directly to your local drive without memory limits."
+                          : "This browser does not support disk streaming (OPFS). In-memory transfers are capped at 100 MB to prevent tab memory crashes."}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {isQuotaExceeded && (
                   <div className="p-3 rounded-lg bg-error-container/20 border border-error/30 text-error flex items-center gap-2 text-xs">
                     <AlertTriangle size={15} className="shrink-0" />
                     <span>
-                      Insufficient device storage: incoming batch requires {formatSize(batchTotal)}, but only {formatSize(storageCapability.available!)} is free.
+                      Storage space warning: incoming batch requires {formatSize(batchTotal)}, but only {formatSize(storageCapability.available!)} free space is estimated.
                     </span>
                   </div>
                 )}
@@ -241,7 +269,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             );
           })()}
 
-          <div className="flex items-center justify-end gap-3 pt-2">
+          <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
             <button
               onClick={handleDeclineTransfer}
               className="px-4 py-2 rounded-lg bg-surface-container-lowest hover:bg-surface-container text-on-surface-variant hover:text-error transition-colors font-body-sm flex items-center gap-1.5 border border-white/[0.06] cursor-pointer"
@@ -249,12 +277,24 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <XCircle size={16} />
               <span>Decline</span>
             </button>
+
+            {storageCapability?.isFileSystemAccessSupported && (
+              <button
+                onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile()}
+                className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors flex items-center gap-1.5 border border-white/[0.08] cursor-pointer shadow-sm"
+                title="Select a local destination file to write chunks directly onto your drive"
+              >
+                <HardDrive size={16} className="text-secondary" />
+                <span>Save to Specific File...</span>
+              </button>
+            )}
+
             <button
               onClick={handleAcceptTransfer}
               className="px-5 py-2 rounded-lg bg-secondary text-on-secondary hover:bg-secondary-fixed transition-colors font-body-sm font-semibold flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
             >
               <CheckCircle2 size={16} />
-              <span>Accept &amp; Stream Files</span>
+              <span>Accept &amp; Stream</span>
             </button>
           </div>
         </div>
