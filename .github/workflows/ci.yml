@@ -36,7 +36,7 @@ jobs:
         run: npm ci
 
       - name: Run Dependency Audit
-        run: npm audit --audit-level=high
+        run: npm audit
 
       - name: Secret Scanning Guard
         run: |
