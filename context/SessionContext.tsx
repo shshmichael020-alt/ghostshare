@@ -11,7 +11,6 @@ import React, {
 } from "react";
 import {
   createPeerConnection,
-  fetchIceServers,
   waitForIceGathering,
   streamFileOverDataChannel,
   decodeBinaryFrame,
@@ -24,7 +23,6 @@ import {
   isValidIceCandidateInit,
   sanitizeFileName,
   sanitizeMimeType,
-  sanitizeFileId,
   sanitizeChatText,
   generateTransferId,
   isValidProtocolId,
@@ -689,7 +687,7 @@ export function SessionProvider({
         console.error("Error processing control message:", err);
       }
     },
-    [pushToast],
+    [pushToast, storageCapability],
   );
 
   const handleBinaryChunk = useCallback(async (data: ArrayBuffer | Blob) => {
@@ -714,7 +712,7 @@ export function SessionProvider({
       return; // Reject malformed or unframed data explicitly
     }
 
-    const { fileId, chunkIndex, offset, payload } = frame;
+    const { fileId, offset, payload } = frame;
 
     // Discard chunks for already completed files (prevent duplicate buffering)
     if (receivedFilesRef.current.some((f) => f.id === fileId)) {
