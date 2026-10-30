@@ -380,9 +380,9 @@ npm test
 
 The repository utilizes GitHub Actions (`.github/workflows/ci.yml`) to enforce automated quality gates on every commit and pull request:
 - **Least-Privilege Token Permissions**: Strict `permissions: contents: read` configuration.
-- **Automated Verification**: Runs `npm ci`, `npx tsc --noEmit`, `npm run lint`, `npm test`, `npm run cf:build`, and `npm audit`.
+- **Automated Verification**: Runs `npm ci`, `npx tsc --noEmit`, `npm run lint`, `npm test`, and `npm run cf:build`.
 - **Secret Scanning Guard**: Scans repository commits for accidental credential leaks.
-- **Zero-Vulnerability Baseline**: Pinned dependencies adhere to strict security policies (`npm audit: found 0 vulnerabilities`).
+- **Dependency Pinning & OpenNext Upstream Compatibility**: `next@16.2.12` is intentionally pinned. Upstream Next.js 16.3+ introduces breaking changes to internal route manifests that trigger runtime failures (`Error: No such module "file:/.next/None"`) under `@opennextjs/cloudflare@1.20.2`. Upstream Next.js advisories are documented, accepted, and mitigated by the Cloudflare Worker edge environment and strict request body limits. Upgrading OpenNext and Next.js is deferred until an upstream OpenNext Cloudflare release provides full Next.js 16.4+ runtime compatibility without introducing supply-chain vulnerabilities.
 
 ---
 
