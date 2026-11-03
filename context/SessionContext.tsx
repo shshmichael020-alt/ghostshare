@@ -377,7 +377,7 @@ export function SessionProvider({
 
   const endLocalFilePicker = useCallback((pauseId?: string) => {
     setIsFilePickerActiveState(false);
-    coordinatorRef.current.endLocalSuspension(pauseId);
+    coordinatorRef.current?.endLocalSuspension(pauseId);
   }, []);
 
   const setFilePickerActive = useCallback(
