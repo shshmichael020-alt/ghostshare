@@ -6,7 +6,7 @@ export interface SignalMessage {
   id: string;
   sender: "receiver" | "sender";
   target: "receiver" | "sender";
-  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave";
+  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave" | "peer-suspended" | "peer-resumed";
   data: unknown;
   timestamp: number;
 }

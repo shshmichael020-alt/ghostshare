@@ -44,6 +44,7 @@ import {
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
 import { useToasts } from "@/lib/useToasts";
+import { LifecycleCoordinator } from "@/lib/lifecycleCoordinator";
 
 export type SessionMode = "receive" | "send" | "dual";
 
@@ -150,9 +151,12 @@ export interface SessionContextType {
   sendMessage: (text: string) => boolean;
   markChatRead: () => void;
 
-  // Mobile Lifecycle & File Picker
+  // Mobile Lifecycle & Peer-to-Peer Suspension
   isFilePickerActive: boolean;
   setFilePickerActive: (active: boolean) => void;
+  isRemoteSuspended: boolean;
+  startLocalFilePicker: () => string;
+  endLocalFilePicker: (pauseId?: string) => void;
 
   // UI Toast helpers
   pushToast: (msg: string, type?: "default" | "success" | "error") => void;
@@ -166,6 +170,82 @@ export function useGhostSession(): SessionContextType {
     throw new Error("useGhostSession must be used within a SessionProvider");
   }
   return ctx;
+}
+
+function createLifecycleCoordinator(
+  setConnStatus: (status: "idle" | "awaiting" | "connecting" | "connected" | "reconnecting" | "failed" | "disconnected") => void,
+  pcRef: React.RefObject<RTCPeerConnection | null>,
+  currentCodeRef: React.RefObject<string | null>,
+  currentTokenRef: React.RefObject<string | null>,
+  currentRoleRef: React.RefObject<"creator" | "joiner" | null>,
+  dcControlRef: React.RefObject<RTCDataChannel | null>,
+): LifecycleCoordinator {
+  return new LifecycleCoordinator({
+    onStatusChange: (newStatus) => {
+      setConnStatus(newStatus);
+    },
+    onTriggerIceRestart: async () => {
+      const pc = pcRef.current;
+      const c = currentCodeRef.current;
+      if (!pc || !c) return false;
+      return triggerIceRestart(pc, c, "sender", "receiver", currentTokenRef.current || undefined);
+    },
+    onSendPeerSuspended: (pauseId) => {
+      const now = Date.now();
+      const msg: WebRTCMessage = {
+        type: "peer-suspended",
+        pauseId,
+        reason: "file-picker",
+        timestamp: now,
+        senderRole: currentRoleRef.current || undefined,
+      };
+      if (dcControlRef.current && dcControlRef.current.readyState === "open") {
+        try {
+          dcControlRef.current.send(JSON.stringify(msg));
+        } catch {}
+      }
+      if (currentCodeRef.current && currentRoleRef.current && currentTokenRef.current) {
+        const sSender = currentRoleRef.current === "creator" ? "receiver" : "sender";
+        const sTarget = currentRoleRef.current === "creator" ? "sender" : "receiver";
+        sendSignalMessage(
+          currentCodeRef.current,
+          sSender,
+          sTarget,
+          "peer-suspended",
+          { pauseId, reason: "file-picker" },
+          currentTokenRef.current,
+        ).catch(() => {});
+      }
+    },
+    onSendPeerResumed: (pauseId) => {
+      const now = Date.now();
+      const msg: WebRTCMessage = {
+        type: "peer-resumed",
+        pauseId,
+        timestamp: now,
+        senderRole: currentRoleRef.current || undefined,
+      };
+      if (dcControlRef.current && dcControlRef.current.readyState === "open") {
+        try {
+          dcControlRef.current.send(JSON.stringify(msg));
+        } catch {}
+      }
+      if (currentCodeRef.current && currentRoleRef.current && currentTokenRef.current) {
+        const sSender = currentRoleRef.current === "creator" ? "receiver" : "sender";
+        const sTarget = currentRoleRef.current === "creator" ? "sender" : "receiver";
+        sendSignalMessage(
+          currentCodeRef.current,
+          sSender,
+          sTarget,
+          "peer-resumed",
+          { pauseId },
+          currentTokenRef.current,
+        ).catch(() => {});
+      }
+    },
+    getPeerConnection: () => pcRef.current,
+    isDataChannelOpen: () => dcControlRef.current?.readyState === "open",
+  });
 }
 
 export function SessionProvider({
@@ -274,62 +354,42 @@ export function SessionProvider({
   const currentTokenRef = useRef<string | null>(null);
   const currentRoleRef = useRef<"creator" | "joiner" | null>(null);
 
-  // Mobile Lifecycle & File Picker Refs
+  // Mobile Lifecycle & Peer-to-Peer Suspension Coordinator
   const [isFilePickerActive, setIsFilePickerActiveState] = useState<boolean>(false);
-  const isFilePickerActiveRef = useRef<boolean>(false);
-  const filePickerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isPageHiddenRef = useRef<boolean>(
-    typeof document !== "undefined" ? document.visibilityState === "hidden" : false
-  );
-  const postResumeGraceRef = useRef<boolean>(false);
-  const postResumeGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const iceDisconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasEverConnectedRef = useRef<boolean>(false);
+  const [isRemoteSuspended, setIsRemoteSuspended] = useState<boolean>(false);
+  const coordinatorRef = useRef<LifecycleCoordinator | null>(null);
 
-  const setFilePickerActive = useCallback((active: boolean) => {
-    isFilePickerActiveRef.current = active;
-    setIsFilePickerActiveState(active);
-    if (filePickerTimeoutRef.current) {
-      clearTimeout(filePickerTimeoutRef.current);
-      filePickerTimeoutRef.current = null;
-    }
-    if (active) {
-      if (iceDisconnectTimerRef.current) {
-        clearTimeout(iceDisconnectTimerRef.current);
-        iceDisconnectTimerRef.current = null;
-      }
-      filePickerTimeoutRef.current = setTimeout(() => {
-        isFilePickerActiveRef.current = false;
-        setIsFilePickerActiveState(false);
-      }, 60000);
-    } else {
-      postResumeGraceRef.current = true;
-      if (postResumeGraceTimerRef.current) {
-        clearTimeout(postResumeGraceTimerRef.current);
-      }
-      postResumeGraceTimerRef.current = setTimeout(() => {
-        postResumeGraceTimerRef.current = null;
-        postResumeGraceRef.current = false;
-        const pc = pcRef.current;
-        if (
-          pc &&
-          pc.iceConnectionState === "disconnected" &&
-          hasEverConnectedRef.current
-        ) {
-          setConnStatus("reconnecting");
-          if (currentRoleRef.current === "joiner" && currentCodeRef.current) {
-            triggerIceRestart(
-              pc,
-              currentCodeRef.current,
-              "sender",
-              "receiver",
-              currentTokenRef.current || undefined
-            );
-          }
-        }
-      }, 5000);
-    }
+  useEffect(() => {
+    coordinatorRef.current = createLifecycleCoordinator(
+      setConnStatus,
+      pcRef,
+      currentCodeRef,
+      currentTokenRef,
+      currentRoleRef,
+      dcControlRef,
+    );
   }, []);
+
+  const startLocalFilePicker = useCallback((): string => {
+    setIsFilePickerActiveState(true);
+    return coordinatorRef.current?.startLocalSuspension("file-picker") || `pause-${Date.now()}`;
+  }, []);
+
+  const endLocalFilePicker = useCallback((pauseId?: string) => {
+    setIsFilePickerActiveState(false);
+    coordinatorRef.current.endLocalSuspension(pauseId);
+  }, []);
+
+  const setFilePickerActive = useCallback(
+    (active: boolean) => {
+      if (active) {
+        startLocalFilePicker();
+      } else {
+        endLocalFilePicker();
+      }
+    },
+    [startLocalFilePicker, endLocalFilePicker],
+  );
 
   useEffect(() => {
     currentCodeRef.current = code;
@@ -339,7 +399,8 @@ export function SessionProvider({
   }, [sessionToken]);
   useEffect(() => {
     currentRoleRef.current = role;
-  }, [role]);
+    coordinatorRef.current?.setSessionInfo(role, code, connStatus);
+  }, [role, code, connStatus]);
 
   const { toasts, push, dismiss } = useToasts();
 
@@ -358,7 +419,15 @@ export function SessionProvider({
       try {
         const msg = JSON.parse(rawData) as WebRTCMessage;
 
-        if (msg.type === "chat") {
+        if (msg.type === "peer-suspended") {
+          coordinatorRef.current?.handleRemoteSuspended(msg.pauseId, msg.timestamp);
+          setIsRemoteSuspended(true);
+          return;
+        } else if (msg.type === "peer-resumed") {
+          coordinatorRef.current?.handleRemoteResumed(msg.pauseId);
+          setIsRemoteSuspended(false);
+          return;
+        } else if (msg.type === "chat") {
           const cleanText = sanitizeChatText(msg.text);
           if (!cleanText) return;
           const chatMsg: ChatMessage = {
@@ -897,22 +966,9 @@ export function SessionProvider({
       clearInterval(tickIntervalRef.current);
       tickIntervalRef.current = null;
     }
-    if (iceDisconnectTimerRef.current) {
-      clearTimeout(iceDisconnectTimerRef.current);
-      iceDisconnectTimerRef.current = null;
-    }
-    if (postResumeGraceTimerRef.current) {
-      clearTimeout(postResumeGraceTimerRef.current);
-      postResumeGraceTimerRef.current = null;
-    }
-    if (filePickerTimeoutRef.current) {
-      clearTimeout(filePickerTimeoutRef.current);
-      filePickerTimeoutRef.current = null;
-    }
-    postResumeGraceRef.current = false;
-    isFilePickerActiveRef.current = false;
+    coordinatorRef.current?.reset();
     setIsFilePickerActiveState(false);
-    hasEverConnectedRef.current = false;
+    setIsRemoteSuspended(false);
 
     if (dcControlRef.current) {
       dcControlRef.current.close();
@@ -966,7 +1022,7 @@ export function SessionProvider({
     setStagedFiles([]);
     setPendingApproval(null);
     setActiveReceiving(null);
-  }, []);
+  }, [setIsRemoteSuspended]);
 
   // -------------------------------------------------------------
   // Session Creation (Creator / Host Flow)
@@ -1056,32 +1112,9 @@ export function SessionProvider({
           const iceState = pc.iceConnectionState;
           const connState = pc.connectionState;
 
-          if (iceState === "failed" || connState === "failed") {
-            if (iceDisconnectTimerRef.current) {
-              clearTimeout(iceDisconnectTimerRef.current);
-              iceDisconnectTimerRef.current = null;
-            }
-            if (postResumeGraceTimerRef.current) {
-              clearTimeout(postResumeGraceTimerRef.current);
-              postResumeGraceTimerRef.current = null;
-            }
-            postResumeGraceRef.current = false;
-            setConnStatus("failed");
-            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
-            setConnectionDiagnostic(diag);
-            setNatWarning(diag);
-          } else if (iceState === "connected" || iceState === "completed" || connState === "connected") {
-            hasEverConnectedRef.current = true;
-            if (iceDisconnectTimerRef.current) {
-              clearTimeout(iceDisconnectTimerRef.current);
-              iceDisconnectTimerRef.current = null;
-            }
-            if (postResumeGraceTimerRef.current) {
-              clearTimeout(postResumeGraceTimerRef.current);
-              postResumeGraceTimerRef.current = null;
-            }
-            postResumeGraceRef.current = false;
-            setConnStatus("connected");
+          coordinatorRef.current?.handleIceConnectionStateChange(iceState, connState);
+
+          if (iceState === "connected" || iceState === "completed" || connState === "connected") {
             setNatWarning(null);
             setError(null);
             inspectActiveCandidatePair(pc).then((pair) => {
@@ -1089,28 +1122,10 @@ export function SessionProvider({
               const diag = getSanitizedConnectionDiagnostic("connected", iceState, iceConfig.turnConfigured, pair);
               setConnectionDiagnostic(diag);
             });
-          } else if (iceState === "disconnected" && hasEverConnectedRef.current) {
-            // Background / File-Picker check: do not trigger reconnecting while user is picking files or tab is hidden
-            if (isPageHiddenRef.current || isFilePickerActiveRef.current || postResumeGraceRef.current) {
-              if (iceDisconnectTimerRef.current) {
-                clearTimeout(iceDisconnectTimerRef.current);
-                iceDisconnectTimerRef.current = null;
-              }
-              return;
-            }
-
-            // Normal foreground grace period: 5s transient mobile carrier latency
-            if (!iceDisconnectTimerRef.current) {
-              iceDisconnectTimerRef.current = setTimeout(() => {
-                iceDisconnectTimerRef.current = null;
-                if (isPageHiddenRef.current || isFilePickerActiveRef.current || postResumeGraceRef.current) {
-                  return;
-                }
-                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc && hasEverConnectedRef.current) {
-                  setConnStatus("reconnecting");
-                }
-              }, 5000);
-            }
+          } else if (iceState === "failed" || connState === "failed") {
+            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
+            setConnectionDiagnostic(diag);
+            setNatWarning(diag);
           }
         };
 
@@ -1208,6 +1223,14 @@ export function SessionProvider({
                     pendingCandidatesRef.current.push(cand);
                   }
                 }
+              } else if (item.type === "peer-suspended") {
+                const data = item.data as { pauseId: string; timestamp?: number };
+                coordinatorRef.current?.handleRemoteSuspended(data?.pauseId, data?.timestamp || item.timestamp);
+                setIsRemoteSuspended(true);
+              } else if (item.type === "peer-resumed") {
+                const data = item.data as { pauseId: string };
+                coordinatorRef.current?.handleRemoteResumed(data?.pauseId);
+                setIsRemoteSuspended(false);
               } else if (item.type === "leave") {
                 setConnStatus("awaiting");
                 pushToast("Peer detached from session", "default");
@@ -1229,7 +1252,7 @@ export function SessionProvider({
         return null;
       }
     },
-    [disconnectSession, attachDataChannelListeners, pushToast],
+    [disconnectSession, attachDataChannelListeners, pushToast, setIsRemoteSuspended],
   );
 
   // -------------------------------------------------------------
@@ -1369,32 +1392,9 @@ export function SessionProvider({
           const iceState = pc.iceConnectionState;
           const connState = pc.connectionState;
 
-          if (iceState === "failed" || connState === "failed") {
-            if (iceDisconnectTimerRef.current) {
-              clearTimeout(iceDisconnectTimerRef.current);
-              iceDisconnectTimerRef.current = null;
-            }
-            if (postResumeGraceTimerRef.current) {
-              clearTimeout(postResumeGraceTimerRef.current);
-              postResumeGraceTimerRef.current = null;
-            }
-            postResumeGraceRef.current = false;
-            setConnStatus("failed");
-            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
-            setConnectionDiagnostic(diag);
-            setNatWarning(diag);
-          } else if (iceState === "connected" || iceState === "completed" || connState === "connected") {
-            hasEverConnectedRef.current = true;
-            if (iceDisconnectTimerRef.current) {
-              clearTimeout(iceDisconnectTimerRef.current);
-              iceDisconnectTimerRef.current = null;
-            }
-            if (postResumeGraceTimerRef.current) {
-              clearTimeout(postResumeGraceTimerRef.current);
-              postResumeGraceTimerRef.current = null;
-            }
-            postResumeGraceRef.current = false;
-            setConnStatus("connected");
+          coordinatorRef.current?.handleIceConnectionStateChange(iceState, connState);
+
+          if (iceState === "connected" || iceState === "completed" || connState === "connected") {
             setNatWarning(null);
             setError(null);
             inspectActiveCandidatePair(pc).then((pair) => {
@@ -1402,29 +1402,10 @@ export function SessionProvider({
               const diag = getSanitizedConnectionDiagnostic("connected", iceState, iceConfig.turnConfigured, pair);
               setConnectionDiagnostic(diag);
             });
-          } else if (iceState === "disconnected" && hasEverConnectedRef.current) {
-            // Background / File-Picker check: do not trigger reconnecting while user is picking files or tab is hidden
-            if (isPageHiddenRef.current || isFilePickerActiveRef.current || postResumeGraceRef.current) {
-              if (iceDisconnectTimerRef.current) {
-                clearTimeout(iceDisconnectTimerRef.current);
-                iceDisconnectTimerRef.current = null;
-              }
-              return;
-            }
-
-            // Normal foreground grace period: 5s transient mobile carrier latency
-            if (!iceDisconnectTimerRef.current) {
-              iceDisconnectTimerRef.current = setTimeout(() => {
-                iceDisconnectTimerRef.current = null;
-                if (isPageHiddenRef.current || isFilePickerActiveRef.current || postResumeGraceRef.current) {
-                  return;
-                }
-                if (pc.iceConnectionState === "disconnected" && pcRef.current === pc && hasEverConnectedRef.current) {
-                  setConnStatus("reconnecting");
-                  triggerIceRestart(pc, codeToJoin, "sender", "receiver", currentToken || undefined);
-                }
-              }, 5000);
-            }
+          } else if (iceState === "failed" || connState === "failed") {
+            const diag = getSanitizedConnectionDiagnostic("failed", iceState, iceConfig.turnConfigured, null);
+            setConnectionDiagnostic(diag);
+            setNatWarning(diag);
           }
         };
 
@@ -1487,6 +1468,14 @@ export function SessionProvider({
                   }
                   pendingCandidatesRef.current = [];
                 }
+              } else if (item.type === "peer-suspended") {
+                const data = item.data as { pauseId: string; timestamp?: number };
+                coordinatorRef.current?.handleRemoteSuspended(data?.pauseId, data?.timestamp || item.timestamp);
+                setIsRemoteSuspended(true);
+              } else if (item.type === "peer-resumed") {
+                const data = item.data as { pauseId: string };
+                coordinatorRef.current?.handleRemoteResumed(data?.pauseId);
+                setIsRemoteSuspended(false);
               } else if (item.type === "candidate-batch") {
                 const batch = item.data as RTCIceCandidateInit[];
                 for (const cand of batch) {
@@ -1516,7 +1505,7 @@ export function SessionProvider({
         return false;
       }
     },
-    [disconnectSession, attachDataChannelListeners, pushToast],
+    [disconnectSession, attachDataChannelListeners, pushToast, setIsRemoteSuspended],
   );
 
   // -------------------------------------------------------------
@@ -1987,124 +1976,35 @@ export function SessionProvider({
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
 
-    const handleBackgroundPause = () => {
-      isPageHiddenRef.current = true;
-      if (iceDisconnectTimerRef.current) {
-        clearTimeout(iceDisconnectTimerRef.current);
-        iceDisconnectTimerRef.current = null;
-      }
+    const handleBackground = () => {
+      coordinatorRef.current?.handlePageVisibility(true);
     };
 
-    const handleForegroundResume = () => {
-      isPageHiddenRef.current = false;
-
-      // Reset file picker flag on foreground return
-      if (isFilePickerActiveRef.current) {
-        isFilePickerActiveRef.current = false;
-        setIsFilePickerActiveState(false);
-        if (filePickerTimeoutRef.current) {
-          clearTimeout(filePickerTimeoutRef.current);
-          filePickerTimeoutRef.current = null;
-        }
-      }
-
-      const pc = pcRef.current;
-      if (!pc || pc.signalingState === "closed" || pc.connectionState === "closed") {
-        return;
-      }
-
-      if (pc.iceConnectionState === "failed" || pc.connectionState === "failed") {
-        setConnStatus("failed");
-        return;
-      }
-
-      // Check if data channels or peer connection are healthy
-      const isIceHealthy = pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed";
-      const isConnHealthy = pc.connectionState === "connected" && pc.iceConnectionState !== "disconnected";
-      const isDataChannelHealthy =
-        (dcControlRef.current?.readyState === "open" ||
-        dcFileOutRef.current?.readyState === "open" ||
-        dcFileInRef.current?.readyState === "open") &&
-        pc.iceConnectionState !== "disconnected";
-
-      if (isIceHealthy || isConnHealthy || isDataChannelHealthy) {
-        if (iceDisconnectTimerRef.current) {
-          clearTimeout(iceDisconnectTimerRef.current);
-          iceDisconnectTimerRef.current = null;
-        }
-        if (postResumeGraceTimerRef.current) {
-          clearTimeout(postResumeGraceTimerRef.current);
-          postResumeGraceTimerRef.current = null;
-        }
-        postResumeGraceRef.current = false;
-        setConnStatus((prev) => (prev !== "connected" && hasEverConnectedRef.current ? "connected" : prev));
-        return;
-      }
-
-      // If disconnected, grant post-resume grace window to let STUN keepalives recover automatically
-      if (pc.iceConnectionState === "disconnected") {
-        postResumeGraceRef.current = true;
-        if (postResumeGraceTimerRef.current) {
-          clearTimeout(postResumeGraceTimerRef.current);
-        }
-        postResumeGraceTimerRef.current = setTimeout(() => {
-          postResumeGraceTimerRef.current = null;
-          postResumeGraceRef.current = false;
-
-          const currentPc = pcRef.current;
-          if (
-            currentPc &&
-            currentPc === pc &&
-            currentPc.iceConnectionState === "disconnected" &&
-            hasEverConnectedRef.current
-          ) {
-            setConnStatus("reconnecting");
-            if (currentRoleRef.current === "joiner" && currentCodeRef.current) {
-              triggerIceRestart(
-                currentPc,
-                currentCodeRef.current,
-                "sender",
-                "receiver",
-                currentTokenRef.current || undefined
-              );
-            }
-          }
-        }, 5000);
-      }
+    const handleForeground = () => {
+      coordinatorRef.current?.handlePageVisibility(false);
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        handleBackgroundPause();
-      } else if (document.visibilityState === "visible") {
-        handleForegroundResume();
-      }
+      coordinatorRef.current?.handlePageVisibility(document.visibilityState === "hidden");
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleForegroundResume);
-    window.addEventListener("blur", handleBackgroundPause);
-    window.addEventListener("pageshow", handleForegroundResume);
-    window.addEventListener("pagehide", handleBackgroundPause);
-    window.addEventListener("resume", handleForegroundResume as EventListener);
-    window.addEventListener("freeze", handleBackgroundPause as EventListener);
+    window.addEventListener("focus", handleForeground);
+    window.addEventListener("blur", handleBackground);
+    window.addEventListener("pageshow", handleForeground);
+    window.addEventListener("pagehide", handleBackground);
+    window.addEventListener("resume", handleForeground as EventListener);
+    window.addEventListener("freeze", handleBackground as EventListener);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", handleForegroundResume);
-      window.removeEventListener("blur", handleBackgroundPause);
-      window.removeEventListener("pageshow", handleForegroundResume);
-      window.removeEventListener("pagehide", handleBackgroundPause);
-      window.removeEventListener("resume", handleForegroundResume as EventListener);
-      window.removeEventListener("freeze", handleBackgroundPause as EventListener);
-      if (postResumeGraceTimerRef.current) {
-        clearTimeout(postResumeGraceTimerRef.current);
-        postResumeGraceTimerRef.current = null;
-      }
-      if (filePickerTimeoutRef.current) {
-        clearTimeout(filePickerTimeoutRef.current);
-        filePickerTimeoutRef.current = null;
-      }
+      window.removeEventListener("focus", handleForeground);
+      window.removeEventListener("blur", handleBackground);
+      window.removeEventListener("pageshow", handleForeground);
+      window.removeEventListener("pagehide", handleBackground);
+      window.removeEventListener("resume", handleForeground as EventListener);
+      window.removeEventListener("freeze", handleBackground as EventListener);
+      coordinatorRef.current?.cancelRecoveryTimers("unmount");
     };
   }, []);
 
@@ -2159,6 +2059,9 @@ export function SessionProvider({
         markChatRead,
         isFilePickerActive,
         setFilePickerActive,
+        isRemoteSuspended,
+        startLocalFilePicker,
+        endLocalFilePicker,
         pushToast,
       }}
     >

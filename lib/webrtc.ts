@@ -189,6 +189,8 @@ export type WebRTCMessage =
   | { type: "resume-query"; id: string; senderRole?: "creator" | "joiner" }
   | { type: "resume-ack"; id: string; receivedBytes: number; senderRole?: "creator" | "joiner" }
   | { type: "transfer-complete"; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "peer-suspended"; pauseId: string; reason?: string; timestamp: number; senderRole?: "creator" | "joiner" }
+  | { type: "peer-resumed"; pauseId: string; timestamp: number; senderRole?: "creator" | "joiner" }
   | { type: "chat"; id: string; text: string; sentAt: number; senderRole?: "creator" | "joiner"; senderName?: string };
 
 export const BINARY_FRAME_MAGIC = 0x4753; // 'GS' ASCII identifier
@@ -639,7 +641,8 @@ const activeIceRestarts = new WeakSet<RTCPeerConnection>();
 
 /**
  * Triggers an ICE restart across RTCPeerConnection to silently recover from network drops.
- * Mutual exclusion guards against concurrent or overlapping ICE restarts on the same peer connection.
+ * Mutual exclusion guards against concurrent or overlapping ICE restarts until the
+ * offer/answer negotiation cycle settles back to stable signaling state.
  */
 export async function triggerIceRestart(
   pc: RTCPeerConnection,
@@ -648,22 +651,60 @@ export async function triggerIceRestart(
   target: "sender" | "receiver",
   token?: string,
 ): Promise<boolean> {
-  if (!pc || pc.signalingState === "closed" || pc.connectionState === "closed") {
+  if (!pc || pc.signalingState !== "stable" || pc.connectionState === "closed") {
     return false;
   }
   if (activeIceRestarts.has(pc)) {
     return false;
   }
   activeIceRestarts.add(pc);
+
+  let cleanupDone = false;
+  let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const cleanup = () => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    activeIceRestarts.delete(pc);
+    if (safetyTimer) {
+      clearTimeout(safetyTimer);
+      safetyTimer = null;
+    }
+    try {
+      if (typeof pc.removeEventListener === "function") {
+        pc.removeEventListener("signalingstatechange", onSignalingStateChange);
+      }
+    } catch {}
+  };
+
+  const onSignalingStateChange = () => {
+    if (pc.signalingState === "stable" || pc.signalingState === "closed") {
+      cleanup();
+    }
+  };
+
+  try {
+    if (typeof pc.addEventListener === "function") {
+      pc.addEventListener("signalingstatechange", onSignalingStateChange);
+    }
+  } catch {}
+
+  // Safety fallback: auto-release guard after 15 seconds if answer never completes
+  safetyTimer = setTimeout(cleanup, 15000);
+
   try {
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
-    return await sendSignalMessage(code, sender, target, "offer", offer, token);
+    const sent = await sendSignalMessage(code, sender, target, "offer", offer, token);
+    if (!sent) {
+      cleanup();
+      return false;
+    }
+    return true;
   } catch (err) {
+    cleanup();
     console.warn("ICE restart initiation failed:", err);
     return false;
-  } finally {
-    activeIceRestarts.delete(pc);
   }
 }
 
@@ -674,7 +715,7 @@ export async function sendSignalMessage(
   code: string,
   sender: "receiver" | "sender",
   target: "receiver" | "sender",
-  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave",
+  type: "offer" | "answer" | "candidate" | "candidate-batch" | "ping" | "leave" | "peer-suspended" | "peer-resumed",
   data: unknown,
   token?: string,
 ): Promise<boolean> {

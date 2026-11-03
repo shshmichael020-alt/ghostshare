@@ -67,7 +67,9 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     storageCapability,
     candidatePair,
     pushToast,
-    setFilePickerActive,
+    isRemoteSuspended,
+    startLocalFilePicker,
+    endLocalFilePicker,
   } = useGhostSession();
 
   const [inputCode, setInputCode] = useState(initialCode ?? "");
@@ -93,13 +95,13 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     const input = fileInputRef.current;
     if (!input) return;
     const handleCancel = () => {
-      setFilePickerActive(false);
+      endLocalFilePicker();
     };
     input.addEventListener("cancel", handleCancel);
     return () => {
       input.removeEventListener("cancel", handleCancel);
     };
-  }, [setFilePickerActive]);
+  }, [endLocalFilePicker]);
 
   // Drag and drop handlers
   const handleDragOver = (e: React.DragEvent) => {
@@ -124,12 +126,12 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
   };
 
   const openFilePicker = useCallback(() => {
-    setFilePickerActive(true);
+    startLocalFilePicker();
     fileInputRef.current?.click();
-  }, [setFilePickerActive]);
+  }, [startLocalFilePicker]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFilePickerActive(false);
+    endLocalFilePicker();
     if (e.target.files && e.target.files.length > 0) {
       handleFiles(e.target.files);
     }
@@ -435,10 +437,16 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
       {/* Active Session Status Bar */}
       <div className="p-4 rounded-2xl bg-surface-container-low border border-white/[0.08] flex flex-wrap items-center justify-between gap-4 shadow-sm">
         <div className="flex items-center gap-3">
-          <div className="w-3 h-3 rounded-full bg-tertiary animate-pulse" />
+          <div
+            className={`w-3 h-3 rounded-full animate-pulse ${
+              isRemoteSuspended ? "bg-amber-400" : "bg-tertiary"
+            }`}
+          />
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-on-surface">Dual P2P Tunnel Active</span>
+              <span className="text-xs font-semibold text-on-surface">
+                {isRemoteSuspended ? "Peer is selecting files..." : "Dual P2P Tunnel Active"}
+              </span>
               <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-on-surface-variant uppercase border border-white/[0.06]">
                 Code: {code}
               </span>

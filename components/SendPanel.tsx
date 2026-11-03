@@ -40,7 +40,9 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     clearAllStaged,
     triggerTransferRequest,
     retryFailedFile,
-    setFilePickerActive,
+    isRemoteSuspended,
+    startLocalFilePicker,
+    endLocalFilePicker,
   } = useGhostSession();
 
   const [codeInput, setCodeInput] = useState(initialCode ?? activeSessionCode ?? "");
@@ -52,9 +54,9 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const hasAutoJoinedRef = useRef(false);
 
   const openFilePicker = useCallback(() => {
-    setFilePickerActive(true);
+    startLocalFilePicker();
     fileInputRef.current?.click();
-  }, [setFilePickerActive]);
+  }, [startLocalFilePicker]);
 
   const isConnecting = checking || connStatus === "connecting" || connStatus === "reconnecting";
 
@@ -88,13 +90,13 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     const input = fileInputRef.current;
     if (!input) return;
     const handleCancel = () => {
-      setFilePickerActive(false);
+      endLocalFilePicker();
     };
     input.addEventListener("cancel", handleCancel);
     return () => {
       input.removeEventListener("cancel", handleCancel);
     };
-  }, [setFilePickerActive]);
+  }, [endLocalFilePicker]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */
@@ -269,8 +271,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           </div>
 
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-container-high text-on-surface">
-            <span className="w-2 h-2 rounded-full bg-tertiary" />
-            <span className="font-body-sm font-medium">Peer Connected (P2P Direct)</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isRemoteSuspended ? "bg-amber-400 animate-pulse" : "bg-tertiary"
+              }`}
+            />
+            <span className="font-body-sm font-medium">
+              {isRemoteSuspended ? "Peer is selecting files..." : "Peer Connected (P2P Direct)"}
+            </span>
           </div>
         </div>
 
@@ -350,7 +358,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               multiple
               className="hidden"
               onChange={(e) => {
-                setFilePickerActive(false);
+                endLocalFilePicker();
                 if (e.target.files && e.target.files.length > 0) {
                   handleFiles(e.target.files);
                 }

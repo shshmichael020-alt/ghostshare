@@ -60,6 +60,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     turnConfigured,
     candidatePair,
     connectionDiagnostic,
+    isRemoteSuspended,
   } = useGhostSession();
 
   const [downloadingAll, setDownloadingAll] = useState(false);
@@ -119,7 +120,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <span
                 className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
                   connStatus === "connected"
-                    ? "bg-tertiary"
+                    ? isRemoteSuspended
+                      ? "bg-amber-400"
+                      : "bg-tertiary"
                     : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
                     : connStatus === "failed"
@@ -130,7 +133,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <span
                 className={`relative inline-flex rounded-full h-2 w-2 ${
                   connStatus === "connected"
-                    ? "bg-tertiary"
+                    ? isRemoteSuspended
+                      ? "bg-amber-400"
+                      : "bg-tertiary"
                     : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
                     : connStatus === "failed"
@@ -142,7 +147,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             <span
               className={`font-mono-telemetry font-medium ${
                 connStatus === "connected"
-                  ? "text-tertiary"
+                  ? isRemoteSuspended
+                    ? "text-amber-400"
+                    : "text-tertiary"
                   : connStatus === "connecting"
                   ? "text-primary"
                   : connStatus === "reconnecting"
@@ -153,7 +160,9 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               }`}
             >
               {connStatus === "connected"
-                ? "P2P Bridge Connected"
+                ? isRemoteSuspended
+                  ? "Peer is selecting files..."
+                  : "P2P Bridge Connected"
                 : connStatus === "connecting"
                 ? "Negotiating Handshake..."
                 : connStatus === "reconnecting"

@@ -16,6 +16,8 @@ const ALLOWED_TYPES = new Set<SignalMessage["type"]>([
   "candidate-batch",
   "ping",
   "leave",
+  "peer-suspended",
+  "peer-resumed",
 ]);
 
 function extractBearer(request: Request, bodyToken?: string): string | undefined {
