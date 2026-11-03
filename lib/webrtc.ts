@@ -635,8 +635,11 @@ export async function streamFileOverDataChannel(
   });
 }
 
+const activeIceRestarts = new WeakSet<RTCPeerConnection>();
+
 /**
  * Triggers an ICE restart across RTCPeerConnection to silently recover from network drops.
+ * Mutual exclusion guards against concurrent or overlapping ICE restarts on the same peer connection.
  */
 export async function triggerIceRestart(
   pc: RTCPeerConnection,
@@ -645,6 +648,13 @@ export async function triggerIceRestart(
   target: "sender" | "receiver",
   token?: string,
 ): Promise<boolean> {
+  if (!pc || pc.signalingState === "closed" || pc.connectionState === "closed") {
+    return false;
+  }
+  if (activeIceRestarts.has(pc)) {
+    return false;
+  }
+  activeIceRestarts.add(pc);
   try {
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
@@ -652,6 +662,8 @@ export async function triggerIceRestart(
   } catch (err) {
     console.warn("ICE restart initiation failed:", err);
     return false;
+  } finally {
+    activeIceRestarts.delete(pc);
   }
 }
 

@@ -40,6 +40,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     clearAllStaged,
     triggerTransferRequest,
     retryFailedFile,
+    setFilePickerActive,
   } = useGhostSession();
 
   const [codeInput, setCodeInput] = useState(initialCode ?? activeSessionCode ?? "");
@@ -49,6 +50,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasAutoJoinedRef = useRef(false);
+
+  const openFilePicker = useCallback(() => {
+    setFilePickerActive(true);
+    fileInputRef.current?.click();
+  }, [setFilePickerActive]);
 
   const isConnecting = checking || connStatus === "connecting" || connStatus === "reconnecting";
 
@@ -77,6 +83,18 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       return () => clearTimeout(timer);
     }
   }, [initialCode, connStatus, connectToReceiver]);
+
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+    const handleCancel = () => {
+      setFilePickerActive(false);
+    };
+    input.addEventListener("cancel", handleCancel);
+    return () => {
+      input.removeEventListener("cancel", handleCancel);
+    };
+  }, [setFilePickerActive]);
 
   /* ------------------------------------------------------------- */
   /* STEP 1: Connect / Verify PIN Screen                           */
@@ -286,7 +304,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 handleFiles(e.dataTransfer.files);
               }
             }}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openFilePicker}
             className={`relative group cursor-pointer transition-all duration-300 rounded-2xl p-8 sm:p-10 flex flex-col items-center justify-center text-center border-2 border-dashed ${
               dragOver
                 ? "border-secondary bg-secondary/5 shadow-[0_0_30px_rgba(76,215,246,0.15)]"
@@ -313,6 +331,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             <div className="flex items-center gap-3 font-body-sm">
               <button
                 type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openFilePicker();
+                }}
                 className="px-4 py-2 rounded-lg bg-surface-container-highest text-on-surface hover:bg-primary hover:text-on-primary transition-all font-medium flex items-center gap-2 shadow-sm border border-white/[0.06]"
               >
                 <FolderOpen size={16} />
@@ -328,7 +350,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               multiple
               className="hidden"
               onChange={(e) => {
-                if (e.target.files) handleFiles(e.target.files);
+                setFilePickerActive(false);
+                if (e.target.files && e.target.files.length > 0) {
+                  handleFiles(e.target.files);
+                }
+                e.target.value = "";
               }}
             />
           </div>

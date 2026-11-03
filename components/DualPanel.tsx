@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { formatSize, formatCountdown } from "@/lib/format";
 import { FileTypeIcon } from "./FileTypeIcon";
 import PinDisplay from "./PinDisplay";
@@ -67,6 +67,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     storageCapability,
     candidatePair,
     pushToast,
+    setFilePickerActive,
   } = useGhostSession();
 
   const [inputCode, setInputCode] = useState(initialCode ?? "");
@@ -87,6 +88,18 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
       return () => clearTimeout(timer);
     }
   }, [initialCode, connStatus, joinGuestSession]);
+
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+    const handleCancel = () => {
+      setFilePickerActive(false);
+    };
+    input.addEventListener("cancel", handleCancel);
+    return () => {
+      input.removeEventListener("cancel", handleCancel);
+    };
+  }, [setFilePickerActive]);
 
   // Drag and drop handlers
   const handleDragOver = (e: React.DragEvent) => {
@@ -110,7 +123,13 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     }
   };
 
+  const openFilePicker = useCallback(() => {
+    setFilePickerActive(true);
+    fileInputRef.current?.click();
+  }, [setFilePickerActive]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFilePickerActive(false);
     if (e.target.files && e.target.files.length > 0) {
       handleFiles(e.target.files);
     }
@@ -496,7 +515,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openFilePicker}
             className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[140px] ${
               dragOver
                 ? "border-primary bg-primary/10"
