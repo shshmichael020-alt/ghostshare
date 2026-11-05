@@ -591,14 +591,20 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/[0.06]">
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Connection</span>
-                <span className="font-mono-telemetry text-on-surface truncate block">
-                  {candidatePair
+                <span className={`font-mono-telemetry truncate block ${
+                  candidatePair?.pathType === "turn-relay"
+                    ? "text-amber-300"
+                    : candidatePair?.pathType === "host-to-host"
+                    ? "text-emerald-300"
+                    : "text-on-surface"
+                }`}>
+                  {candidatePair?.pathLabel || (candidatePair
                     ? candidatePair.isRelayed
                       ? "TURN Relay"
                       : `Direct P2P (${candidatePair.localCandidateType})`
                     : turnConfigured
                     ? "P2P + Relay Ready"
-                    : "Direct STUN"}
+                    : "Direct STUN")}
                 </span>
               </div>
               <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">

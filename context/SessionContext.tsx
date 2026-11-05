@@ -45,7 +45,14 @@ import {
   promptUserSaveFileHandle,
   MAX_RAM_FALLBACK_BYTES,
   cleanupSessionStorage,
+  DEFAULT_BATCH_SIZE,
+  MOBILE_BATCH_SIZE,
 } from "@/lib/opfs";
+import {
+  SenderMetricsTracker,
+  ReceiverMetricsTracker,
+  CompletedTransferSummary,
+} from "@/lib/transferMetrics";
 import { DEFAULT_TTL_SECONDS } from "@/lib/constants";
 import ToastStack from "@/components/ToastStack";
 import { useToasts } from "@/lib/useToasts";
@@ -113,6 +120,7 @@ export interface SessionContextType {
   candidatePair: CandidatePairStats | null;
   connectionDiagnostic: string | null;
   transferSpeed: TransferSpeedMetrics | null;
+  lastTransferSummary: CompletedTransferSummary | null;
 
   // Session metadata & connection
   role: "creator" | "joiner" | null;
@@ -292,6 +300,8 @@ export function SessionProvider({
 
   const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
   const [transferSpeed, setTransferSpeed] = useState<TransferSpeedMetrics | null>(null);
+  const [lastTransferSummary, setLastTransferSummary] = useState<CompletedTransferSummary | null>(null);
+  const receiverMetricsTrackersRef = useRef<Map<string, ReceiverMetricsTracker>>(new Map());
 
   const speedCalcRef = useRef<{
     lastBytes: number;
@@ -394,7 +404,7 @@ export function SessionProvider({
       }
     >
   >(new Map());
-  const pendingChunksRef = useRef<Map<string, { payload: ArrayBuffer; offset?: number }[]>>(new Map());
+  const pendingChunksRef = useRef<Map<string, { payload: ArrayBuffer | Uint8Array; offset?: number }[]>>(new Map());
   const userFileHandlesRef = useRef<Map<string, FileSystemFileHandle>>(new Map());
   const [selectedDestinations, setSelectedDestinations] = useState<Record<string, string>>({});
 
@@ -652,6 +662,18 @@ export function SessionProvider({
 
           try {
             const userFileHandle = userFileHandlesRef.current.get(fileId);
+            const isMobileEnv =
+              typeof navigator !== "undefined" &&
+              /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+            const batchSize = isMobileEnv ? MOBILE_BATCH_SIZE : DEFAULT_BATCH_SIZE;
+
+            const receiverTracker = new ReceiverMetricsTracker(
+              fileId,
+              safeSize,
+              userFileHandle ? "fsa" : storageCapability?.backend || "ram",
+            );
+            receiverMetricsTrackersRef.current.set(fileId, receiverTracker);
+
             const streamer = await createIncomingFileSink(
               activeCode,
               fileId,
@@ -659,7 +681,27 @@ export function SessionProvider({
               safeMime,
               safeSize,
               startOffset,
-              userFileHandle ? { userFileHandle } : undefined,
+              {
+                userFileHandle,
+                batchSizeBytes: batchSize,
+                onPersistedBytes: (persistedBytes) => {
+                  receiverTracker.recordDiskWrite(persistedBytes, 0);
+                  const ctrl = dcControlRef.current;
+                  if (ctrl && ctrl.readyState === "open") {
+                    try {
+                      ctrl.send(
+                        JSON.stringify({
+                          type: "file-progress-ack",
+                          id: fileId,
+                          persistedBytes,
+                          batchId: msg.batchId,
+                          senderRole: currentRoleRef.current || undefined,
+                        }),
+                      );
+                    } catch {}
+                  }
+                },
+              },
             );
 
             const sinkEntry = {
@@ -848,6 +890,28 @@ export function SessionProvider({
                 }),
               );
             }
+
+            const recTracker = receiverMetricsTrackersRef.current.get(fileId);
+            if (recTracker) {
+              recTracker.finish();
+              const recSnapshot = recTracker.getSnapshot();
+              const summary: CompletedTransferSummary = {
+                fileId,
+                fileName: active.meta.name,
+                fileSizeBytes: file.size,
+                durationMs: recSnapshot.endTime ? Math.round(recSnapshot.endTime - recSnapshot.startTime) : 0,
+                effectiveThroughputMbs: recSnapshot.averageSpeedMbs,
+                effectiveThroughputMbps: recSnapshot.averageSpeedMbs * 8,
+                pathType: candidatePairRef.current?.pathType || "unknown",
+                pathLabel: candidatePairRef.current?.pathLabel || "Direct P2P",
+                rttMs: candidatePairRef.current?.currentRoundTripTime ? Math.round(candidatePairRef.current.currentRoundTripTime * 1000) : undefined,
+                storageBackend: recSnapshot.storageBackend,
+                receiverMetrics: recSnapshot,
+              };
+              setLastTransferSummary(summary);
+              receiverMetricsTrackersRef.current.delete(fileId);
+            }
+
             pushToast(`Received: ${active.meta.name} (Verified & Persisted)`, "success");
           } catch (closeErr) {
             console.error("File finalization error:", closeErr);
@@ -902,7 +966,9 @@ export function SessionProvider({
       rawBuffer.byteLength >= 2 &&
       new DataView(rawBuffer).getUint16(0, false) === BINARY_FRAME_MAGIC;
 
+    const decStart = performance.now();
     const frame = decodeBinaryFrame(rawBuffer);
+    const decElapsed = performance.now() - decStart;
     if (!frame) {
       if (hasMagic) {
         console.warn("[GhostShare] Discarded corrupted binary frame with valid magic bytes");
@@ -913,6 +979,11 @@ export function SessionProvider({
     }
 
     const { fileId, offset, payload } = frame;
+    const recTracker = receiverMetricsTrackersRef.current.get(fileId);
+    if (recTracker) {
+      recTracker.recordBytesReceived(rawBuffer.byteLength);
+      recTracker.recordDecodingTime(decElapsed);
+    }
 
     // Discard chunks for already completed files (prevent duplicate buffering)
     if (receivedFilesRef.current.some((f) => f.id === fileId)) {
@@ -1090,6 +1161,8 @@ export function SessionProvider({
     setSessionToken(null);
     setCandidatePair(null);
     setConnectionDiagnostic(null);
+    setLastTransferSummary(null);
+    receiverMetricsTrackersRef.current.clear();
     currentCodeRef.current = null;
     currentTokenRef.current = null;
     currentRoleRef.current = null;
@@ -1702,6 +1775,8 @@ export function SessionProvider({
         );
 
         let lastSenderUiUpdate = 0;
+        const tracker = new SenderMetricsTracker(item.id, item.file.size);
+        const maxInFlightBytes = isMobileDevice ? 2 * 1024 * 1024 : 4 * 1024 * 1024;
 
         try {
           await streamFileOverDataChannel(
@@ -1731,10 +1806,31 @@ export function SessionProvider({
                 prev.map((f) => (f.id === item.id ? { ...f, status: "awaiting-verification", progress: 100 } : f)),
               );
             },
-            { chunkSize, highWaterMark, lowWaterMark },
+            {
+              chunkSize,
+              highWaterMark,
+              lowWaterMark,
+              maxInFlightBytes,
+              metricsTracker: tracker,
+            },
           );
 
           resetTransferSpeed();
+
+          const senderSnapshot = tracker.getSnapshot();
+          const summary: CompletedTransferSummary = {
+            fileId: item.id,
+            fileName: item.name,
+            fileSizeBytes: item.file.size,
+            durationMs: senderSnapshot.endTime ? Math.round(senderSnapshot.endTime - senderSnapshot.startTime) : 0,
+            effectiveThroughputMbs: senderSnapshot.averageSpeedMbs,
+            effectiveThroughputMbps: senderSnapshot.averageSpeedMbs * 8,
+            pathType: candidatePairRef.current?.pathType || "unknown",
+            pathLabel: candidatePairRef.current?.pathLabel || "Direct P2P",
+            rttMs: candidatePairRef.current?.currentRoundTripTime ? Math.round(candidatePairRef.current.currentRoundTripTime * 1000) : undefined,
+            senderMetrics: senderSnapshot,
+          };
+          setLastTransferSummary(summary);
 
           if (!isSubscribed) return;
           setStagedFiles((prev) =>
@@ -2140,6 +2236,7 @@ export function SessionProvider({
         candidatePair,
         connectionDiagnostic,
         transferSpeed,
+        lastTransferSummary,
         startHostSession,
         joinGuestSession,
         disconnectSession,

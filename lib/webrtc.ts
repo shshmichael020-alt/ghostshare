@@ -1,3 +1,5 @@
+import { ConnectionPathType, SenderMetricsTracker } from "./transferMetrics";
+
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   // High-performance Anycast public STUN endpoints with verified low latency worldwide
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -56,6 +58,8 @@ export interface CandidatePairStats {
   remoteCandidateType: string;
   protocol?: string;
   isRelayed: boolean;
+  pathType: ConnectionPathType;
+  pathLabel: string;
   currentRoundTripTime?: number;
   availableOutgoingBitrate?: number;
   bytesSent?: number;
@@ -139,6 +143,22 @@ export async function inspectActiveCandidatePair(
       : "unknown";
     const isRelayed = localCandidateType === "relay" || remoteCandidateType === "relay";
 
+    let pathType: ConnectionPathType = "unknown";
+    let pathLabel = "Direct P2P";
+    if (isRelayed) {
+      pathType = "turn-relay";
+      pathLabel = "TURN Relay";
+    } else if (localCandidateType === "host" && remoteCandidateType === "host") {
+      pathType = "host-to-host";
+      pathLabel = "Direct Local (Host-to-Host)";
+    } else if (localCandidateType === "srflx" || remoteCandidateType === "srflx") {
+      pathType = "srflx-direct";
+      pathLabel = "Direct NAT (STUN Reflected)";
+    } else if (localCandidateType === "prflx" || remoteCandidateType === "prflx") {
+      pathType = "prflx-direct";
+      pathLabel = "Direct NAT (Peer Reflected)";
+    }
+
     const currentRoundTripTime =
       typeof pair.currentRoundTripTime === "number"
         ? pair.currentRoundTripTime
@@ -159,6 +179,8 @@ export async function inspectActiveCandidatePair(
       remoteCandidateType,
       protocol,
       isRelayed,
+      pathType,
+      pathLabel,
       currentRoundTripTime,
       availableOutgoingBitrate,
       bytesSent,
@@ -237,6 +259,10 @@ export const MAX_BUFFERED_AMOUNT = 256 * 1024;      // Preserved for backward co
  */
 export function getAdaptiveChunkSize(pc?: RTCPeerConnection | null, isMobile?: boolean): number {
   if (isMobile) {
+    if (pc && pc.sctp && typeof pc.sctp.maxMessageSize === "number" && pc.sctp.maxMessageSize > 0) {
+      const safeMax = Math.max(MIN_CHUNK_SIZE, pc.sctp.maxMessageSize - 1024);
+      return Math.min(MOBILE_CHUNK_SIZE, safeMax);
+    }
     return MOBILE_CHUNK_SIZE;
   }
   if (pc && pc.sctp && typeof pc.sctp.maxMessageSize === "number" && pc.sctp.maxMessageSize > 0) {
@@ -273,6 +299,7 @@ export type WebRTCMessage =
   | { type: "transfer-decline"; reason?: string; batchId?: string; senderRole?: "creator" | "joiner" }
   | { type: "file-start"; id: string; name: string; size: number; mimeType: string; offset?: number; batchId?: string; senderRole?: "creator" | "joiner" }
   | { type: "file-ready"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
+  | { type: "file-progress-ack"; id: string; persistedBytes: number; batchId?: string; senderRole?: "creator" | "joiner" }
   | { type: "file-end"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
   | { type: "file-ack"; id: string; batchId?: string; senderRole?: "creator" | "joiner" }
   | { type: "file-error"; id: string; error: string; batchId?: string; senderRole?: "creator" | "joiner" }
@@ -391,15 +418,16 @@ export function encodeBinaryFrame(
   fileId: string,
   chunkIndex: number,
   offset: number,
-  payload: ArrayBuffer,
+  payload: ArrayBuffer | Uint8Array,
   preEncodedIdBytes?: Uint8Array,
 ): ArrayBuffer {
   const idBytes = preEncodedIdBytes || new TextEncoder().encode(fileId);
   if (idBytes.length > 255) {
     throw new Error("File ID exceeds 255 bytes limit");
   }
+  const payloadLen = payload.byteLength;
   const headerLen = 5 + idBytes.length + 4 + 8;
-  const out = new Uint8Array(headerLen + payload.byteLength);
+  const out = new Uint8Array(headerLen + payloadLen);
   const view = new DataView(out.buffer);
 
   view.setUint16(0, BINARY_FRAME_MAGIC, false);
@@ -412,17 +440,22 @@ export function encodeBinaryFrame(
   view.setUint32(idxOffset, chunkIndex, false);
   view.setBigUint64(idxOffset + 4, BigInt(offset), false);
 
-  out.set(new Uint8Array(payload), idxOffset + 12);
+  if (payload instanceof Uint8Array) {
+    out.set(payload, idxOffset + 12);
+  } else {
+    out.set(new Uint8Array(payload), idxOffset + 12);
+  }
   return out.buffer;
 }
 
 /**
- * Decodes a binary frame. If magic bytes match, returns structured metadata & payload slice.
+ * Decodes a binary frame. If magic bytes match, returns structured metadata & payload view.
  * If not matching magic bytes, returns null to allow raw unframed binary fallback.
+ * Employs zero-copy Uint8Array view into the packet buffer instead of copying memory.
  */
 export function decodeBinaryFrame(
   buffer: ArrayBuffer,
-): { fileId: string; chunkIndex: number; offset: number; payload: ArrayBuffer } | null {
+): { fileId: string; chunkIndex: number; offset: number; payload: Uint8Array } | null {
   if (buffer.byteLength < 18) return null;
   const view = new DataView(buffer);
   if (view.getUint16(0, false) !== BINARY_FRAME_MAGIC) {
@@ -452,7 +485,8 @@ export function decodeBinaryFrame(
     return null;
   }
 
-  const payload = buffer.slice(idxOffset + 12);
+  // Zero-copy view into underlying ArrayBuffer
+  const payload = new Uint8Array(buffer, idxOffset + 12);
   return { fileId, chunkIndex, offset, payload };
 }
 
@@ -553,13 +587,16 @@ export interface StreamFileOptions {
   chunkSize?: number;
   highWaterMark?: number;
   lowWaterMark?: number;
+  maxInFlightBytes?: number;
+  metricsTracker?: SenderMetricsTracker;
 }
 
 /**
  * Streams a single File chunk-by-chunk across RTCDataChannel.
  * Slices the file on demand so large payloads never saturate browser RAM.
  * Uses pipelined read-ahead (2 chunks in flight) so disk I/O and network transmission overlap.
- * Frames each chunk with structured metadata and enforces explicit readiness and write acknowledgements.
+ * Frames each chunk with structured metadata, enforces receiver credit flow-control,
+ * and awaits explicit readiness and write acknowledgements.
  * Control messages (signals) can optionally use a dedicated controlChannel to avoid backpressure head-of-line blocking.
  */
 export async function streamFileOverDataChannel(
@@ -661,7 +698,29 @@ export async function streamFileOverDataChannel(
   const effectiveChunkSize = options?.chunkSize || DEFAULT_CHUNK_SIZE;
   const highWaterMark = options?.highWaterMark || DEFAULT_HIGH_WATER_MARK;
   const lowWaterMark = options?.lowWaterMark || DEFAULT_LOW_WATER_MARK;
+  const maxInFlightBytes = options?.maxInFlightBytes || (4 * 1024 * 1024);
   const preEncodedIdBytes = new TextEncoder().encode(fileId);
+
+  // Setup receiver flow control listener
+  let receiverPersistedBytes = offset;
+  let creditWaiters: (() => void)[] = [];
+
+  const onControlProgressAck = (e: MessageEvent) => {
+    if (typeof e.data === "string") {
+      try {
+        const m = JSON.parse(e.data) as Record<string, unknown>;
+        if (m.type === "file-progress-ack" && m.id === fileId && (!batchId || m.batchId === batchId)) {
+          if (typeof m.persistedBytes === "number" && m.persistedBytes > receiverPersistedBytes) {
+            receiverPersistedBytes = m.persistedBytes;
+            const waiters = creditWaiters;
+            creditWaiters = [];
+            for (const w of waiters) w();
+          }
+        }
+      } catch {}
+    }
+  };
+  ctrl.addEventListener("message", onControlProgressAck);
 
   // Helper to read chunk arrayBuffer asynchronously
   const readChunk = (sliceStart: number, sliceEnd: number): Promise<ArrayBuffer> => {
@@ -676,40 +735,71 @@ export async function streamFileOverDataChannel(
     nextReadOffset = end;
   }
 
-  // Stream binary slices with backpressure flow control, read-ahead pipelining, and framed metadata
+  // Stream binary slices with backpressure flow control, credit window, read-ahead pipelining, and framed metadata
   let chunkIndex = 0;
-  while (offset < total) {
-    if (isCancelled()) {
-      throw new Error("Transfer cancelled by user");
+  try {
+    while (offset < total) {
+      if (isCancelled()) {
+        throw new Error("Transfer cancelled by user");
+      }
+
+      if (channel.readyState !== "open") {
+        throw new Error(`Data channel [${channel.label}] closed during file streaming`);
+      }
+
+      // Check receiver credit window (flow control)
+      if (offset - receiverPersistedBytes > maxInFlightBytes) {
+        const waitStart = performance.now();
+        await new Promise<void>((resolve) => {
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const resume = () => {
+            if (timer) clearTimeout(timer);
+            resolve();
+          };
+          creditWaiters.push(resume);
+          timer = setTimeout(() => {
+            const idx = creditWaiters.indexOf(resume);
+            if (idx >= 0) creditWaiters.splice(idx, 1);
+            resolve();
+          }, 150);
+        });
+        options?.metricsTracker?.recordFlowControlWait(performance.now() - waitStart);
+      }
+
+      const rawBuffer = nextChunkPromise
+        ? await nextChunkPromise
+        : await readChunk(offset, Math.min(offset + effectiveChunkSize, total));
+
+      const chunkLen = rawBuffer.byteLength;
+      const currentChunkOffset = offset;
+      offset += chunkLen;
+
+      // Immediately trigger read-ahead for the next chunk so disk read overlaps with socket transmission
+      if (nextReadOffset < total) {
+        const nextEnd = Math.min(nextReadOffset + effectiveChunkSize, total);
+        nextChunkPromise = readChunk(nextReadOffset, nextEnd);
+        nextReadOffset = nextEnd;
+      } else {
+        nextChunkPromise = null;
+      }
+
+      // Frame the binary chunk with cached fileId bytes
+      const encStart = performance.now();
+      const framedChunk = encodeBinaryFrame(fileId, chunkIndex, currentChunkOffset, rawBuffer, preEncodedIdBytes);
+      options?.metricsTracker?.recordEncodingTime(performance.now() - encStart);
+
+      const bpStart = performance.now();
+      await sendChunkWithBackpressure(channel, framedChunk, highWaterMark, lowWaterMark);
+      options?.metricsTracker?.recordBackpressureWait(performance.now() - bpStart);
+
+      options?.metricsTracker?.recordBytesRead(chunkLen);
+      options?.metricsTracker?.recordBytesSubmitted(framedChunk.byteLength, channel.bufferedAmount);
+
+      chunkIndex++;
+      onProgress(offset, total);
     }
-
-    if (channel.readyState !== "open") {
-      throw new Error(`Data channel [${channel.label}] closed during file streaming`);
-    }
-
-    const rawBuffer = nextChunkPromise
-      ? await nextChunkPromise
-      : await readChunk(offset, Math.min(offset + effectiveChunkSize, total));
-
-    const chunkLen = rawBuffer.byteLength;
-    const currentChunkOffset = offset;
-    offset += chunkLen;
-
-    // Immediately trigger read-ahead for the next chunk so disk read overlaps with socket transmission
-    if (nextReadOffset < total) {
-      const nextEnd = Math.min(nextReadOffset + effectiveChunkSize, total);
-      nextChunkPromise = readChunk(nextReadOffset, nextEnd);
-      nextReadOffset = nextEnd;
-    } else {
-      nextChunkPromise = null;
-    }
-
-    // Frame the binary chunk with cached fileId bytes
-    const framedChunk = encodeBinaryFrame(fileId, chunkIndex, currentChunkOffset, rawBuffer, preEncodedIdBytes);
-    await sendChunkWithBackpressure(channel, framedChunk, highWaterMark, lowWaterMark);
-
-    chunkIndex++;
-    onProgress(offset, total);
+  } finally {
+    ctrl.removeEventListener("message", onControlProgressAck);
   }
 
   // Ensure all queued binary chunks are completely flushed from the data channel buffer
@@ -757,6 +847,7 @@ export async function streamFileOverDataChannel(
           if (msgFileId === fileId && matchesBatch) {
             if (m.type === "file-ack") {
               cleanup();
+              options?.metricsTracker?.finish();
               resolve();
             } else if (m.type === "file-error") {
               cleanup();

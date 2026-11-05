@@ -452,8 +452,14 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                 Code: {code}
               </span>
               {candidatePair && (
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-secondary border border-white/[0.06]">
-                  {candidatePair.isRelayed ? "TURN Relay" : `Direct (${candidatePair.localCandidateType})`}
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono-telemetry border ${
+                  candidatePair.pathType === "turn-relay"
+                    ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+                    : candidatePair.pathType === "host-to-host"
+                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                    : "bg-surface-container-high text-secondary border-white/[0.06]"
+                }`}>
+                  {candidatePair.pathLabel || (candidatePair.isRelayed ? "TURN Relay" : `Direct (${candidatePair.localCandidateType})`)}
                 </span>
               )}
             </div>

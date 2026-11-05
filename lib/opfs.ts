@@ -156,17 +156,25 @@ export class ByteRangeTracker {
   }
 }
 
+export const DEFAULT_BATCH_SIZE = 512 * 1024; // 512 KB desktop batch size for high-throughput disk I/O
+export const MOBILE_BATCH_SIZE = 256 * 1024;  // 256 KB mobile batch size
+
 export interface OpfsFileStreamer {
-  write: (chunk: ArrayBuffer, offset?: number) => Promise<void>;
+  write: (chunk: ArrayBuffer | Uint8Array, offset?: number) => Promise<void>;
   close: () => Promise<File>;
   abort: () => Promise<void>;
   getBytesWritten: () => number;
+  getBytesPersisted?: () => number;
+  flush?: () => Promise<void>;
+  getWriteStats?: () => { avgLatencyMs: number; maxLatencyMs: number; totalWrites: number };
   isComplete: () => boolean;
   getMissingRanges: () => ByteInterval[];
 }
 
 export interface SinkOptions {
   userFileHandle?: FileSystemFileHandle;
+  batchSizeBytes?: number;
+  onPersistedBytes?: (persistedBytes: number) => void;
 }
 
 export interface StorageCapability {
@@ -329,6 +337,242 @@ export async function createIncomingFileSink(
   const storageKey = sanitizeStorageKey(fileId);
   const userHandle = options?.userFileHandle;
 
+  /**
+   * Internal shared streamer builder for disk-backed FileSystemWritableFileStream handles
+   * (supporting both File System Access API and OPFS directory files).
+   */
+  function createWritableStreamer(
+    writable: FileSystemWritableFileStream,
+    getFinalFile: () => Promise<File>,
+    onAbortCleanup: () => Promise<void>,
+  ): OpfsFileStreamer {
+    let bytesWritten = startOffset;
+    let bytesPersisted = startOffset;
+    let fileCursor = startOffset;
+    const rangeTracker = new ByteRangeTracker(expectedSize, startOffset);
+    let writeChain: Promise<void> = Promise.resolve();
+    let closePromise: Promise<File> | null = null;
+    let isAborted = false;
+    let terminalWriteError: Error | null = null;
+
+    let totalWriteLatencyMs = 0;
+    let maxWriteLatencyMs = 0;
+    let totalWrites = 0;
+
+    const targetBatchSize = typeof options?.batchSizeBytes === "number" ? options.batchSizeBytes : 0;
+    let batchParts: Uint8Array[] = [];
+    let batchAccumulatedBytes = 0;
+    let batchStartOffset = -1;
+
+    const flushBatch = async (): Promise<void> => {
+      if (batchParts.length === 0 || batchAccumulatedBytes === 0) return;
+      const parts = batchParts;
+      const totalBatchLen = batchAccumulatedBytes;
+      const writeOffset = batchStartOffset;
+
+      batchParts = [];
+      batchAccumulatedBytes = 0;
+      batchStartOffset = -1;
+
+      writeChain = writeChain.then(async () => {
+        if (isAborted) throw new Error("Stream has been aborted");
+        if (terminalWriteError) throw terminalWriteError;
+
+        try {
+          const t0 = performance.now();
+          let combined: Uint8Array;
+          if (parts.length === 1) {
+            combined = parts[0];
+          } else {
+            combined = new Uint8Array(totalBatchLen);
+            let pos = 0;
+            for (const p of parts) {
+              combined.set(p, pos);
+              pos += p.byteLength;
+            }
+          }
+
+          if (writeOffset !== fileCursor) {
+            await writable.seek(writeOffset);
+            fileCursor = writeOffset;
+          }
+
+          await writable.write(combined as unknown as BufferSource);
+          fileCursor += totalBatchLen;
+          bytesPersisted += totalBatchLen;
+          rangeTracker.addRange(writeOffset, totalBatchLen);
+
+          const lat = performance.now() - t0;
+          totalWriteLatencyMs += lat;
+          totalWrites++;
+          if (lat > maxWriteLatencyMs) maxWriteLatencyMs = lat;
+
+          if (options?.onPersistedBytes) {
+            options.onPersistedBytes(bytesPersisted);
+          }
+        } catch (writeErr) {
+          const message = (writeErr as Error).message || "Storage quota exceeded";
+          terminalWriteError = new Error(`Disk write failed: ${message}`);
+          console.error("Destination disk write failed:", writeErr);
+          try {
+            if (typeof writable.abort === "function") {
+              await writable.abort();
+            } else {
+              await writable.close();
+            }
+          } catch {}
+          throw terminalWriteError;
+        }
+      });
+      await writeChain;
+    };
+
+    return {
+      write: async (chunk: ArrayBuffer | Uint8Array, offset?: number) => {
+        if (isAborted) throw new Error("Stream has been aborted");
+        if (terminalWriteError) throw terminalWriteError;
+
+        const chunkView = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        const chunkLen = chunkView.byteLength;
+        const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
+        const validation = rangeTracker.validateChunk(chunkOffset, chunkLen);
+
+        if (validation.isZeroLength) return;
+        if (validation.isOutOfBounds) {
+          throw new Error(
+            `Chunk range [${chunkOffset}..${chunkOffset + chunkLen}) exceeds expected size ${expectedSize}`,
+          );
+        }
+        if (validation.isConflictingOverlap) {
+          throw new Error(
+            `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunkLen}`,
+          );
+        }
+        if (validation.isDuplicate) return;
+
+        if (targetBatchSize > 0) {
+          // If incoming chunk is not contiguous with the pending batch, flush current batch first
+          const expectedNextOffset = batchStartOffset === -1 ? chunkOffset : batchStartOffset + batchAccumulatedBytes;
+          if (chunkOffset !== expectedNextOffset) {
+            await flushBatch();
+          }
+
+          if (batchStartOffset === -1) {
+            batchStartOffset = chunkOffset;
+          }
+          batchParts.push(chunkView);
+          batchAccumulatedBytes += chunkLen;
+          bytesWritten += chunkLen;
+
+          if (batchAccumulatedBytes >= targetBatchSize) {
+            await flushBatch();
+          }
+        } else {
+          // Direct unbatched write path (backward compatible)
+          writeChain = writeChain.then(async () => {
+            if (isAborted) throw new Error("Stream has been aborted");
+            if (terminalWriteError) throw terminalWriteError;
+
+            try {
+              const t0 = performance.now();
+              if (typeof offset === "number" && offset !== fileCursor) {
+                await writable.seek(offset);
+                fileCursor = offset;
+              }
+              await writable.write(chunkView as unknown as BufferSource);
+              fileCursor += chunkLen;
+              bytesWritten += chunkLen;
+              bytesPersisted += chunkLen;
+              rangeTracker.addRange(chunkOffset, chunkLen);
+
+              const lat = performance.now() - t0;
+              totalWriteLatencyMs += lat;
+              totalWrites++;
+              if (lat > maxWriteLatencyMs) maxWriteLatencyMs = lat;
+
+              if (options?.onPersistedBytes) {
+                options.onPersistedBytes(bytesPersisted);
+              }
+            } catch (writeErr) {
+              const message = (writeErr as Error).message || "Storage quota exceeded";
+              terminalWriteError = new Error(`Disk write failed: ${message}`);
+              console.error("Destination disk write failed:", writeErr);
+              try {
+                if (typeof writable.abort === "function") {
+                  await writable.abort();
+                } else {
+                  await writable.close();
+                }
+              } catch {}
+              throw terminalWriteError;
+            }
+          });
+          await writeChain;
+        }
+      },
+      close: async () => {
+        if (isAborted) throw new Error("Stream has been aborted");
+        if (terminalWriteError) throw terminalWriteError;
+        if (closePromise) return closePromise;
+        closePromise = (async () => {
+          if (targetBatchSize > 0) {
+            await flushBatch();
+          }
+          await writeChain;
+          if (terminalWriteError) throw terminalWriteError;
+
+          if (!rangeTracker.isComplete()) {
+            const missing = rangeTracker.getMissingRanges();
+            const missingStr = missing.map((m) => `[${m.start}..${m.end})`).join(", ");
+            throw new Error(
+              `Transferred byte length mismatch: missing byte ranges: ${missingStr}. Expected ${expectedSize} bytes, received ${rangeTracker.getTotalBytesReceived()} bytes.`,
+            );
+          }
+
+          try {
+            await writable.close();
+          } catch (closeErr) {
+            terminalWriteError = new Error(`Disk write failed: ${(closeErr as Error).message}`);
+            throw terminalWriteError;
+          }
+
+          const file = await getFinalFile();
+          if (file.size !== expectedSize) {
+            throw new Error(`Size mismatch: expected ${expectedSize} bytes, but wrote ${file.size} bytes`);
+          }
+          return file;
+        })();
+        return closePromise;
+      },
+      abort: async () => {
+        isAborted = true;
+        try {
+          if (typeof writable.abort === "function") {
+            await writable.abort();
+          } else {
+            await writable.close();
+          }
+        } catch {}
+        await onAbortCleanup();
+      },
+      flush: async () => {
+        if (targetBatchSize > 0) {
+          await flushBatch();
+        }
+        await writeChain;
+      },
+      getBytesWritten: () => bytesWritten,
+      getBytesPersisted: () => bytesPersisted,
+      getWriteStats: () => ({
+        avgLatencyMs: totalWrites > 0 ? totalWriteLatencyMs / totalWrites : 0,
+        maxLatencyMs: maxWriteLatencyMs,
+        totalWrites,
+      }),
+      isComplete: () => rangeTracker.isComplete(),
+      getMissingRanges: () => rangeTracker.getMissingRanges(),
+    };
+  }
+
   // Branch A1: Explicit User-Selected File Destination (File System Access API)
   if (userHandle) {
     if (!userHandle || typeof userHandle.createWritable !== "function") {
@@ -349,109 +593,11 @@ export async function createIncomingFileSink(
       await writable.seek(startOffset);
     }
 
-    let bytesWritten = startOffset;
-    let fileCursor = startOffset;
-    const rangeTracker = new ByteRangeTracker(expectedSize, startOffset);
-    let writeChain: Promise<void> = Promise.resolve();
-    let closePromise: Promise<File> | null = null;
-    let isAborted = false;
-    let terminalWriteError: Error | null = null;
-
-    return {
-      write: async (chunk: ArrayBuffer, offset?: number) => {
-        if (isAborted) throw new Error("Stream has been aborted");
-        if (terminalWriteError) throw terminalWriteError;
-
-        const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
-        const validation = rangeTracker.validateChunk(chunkOffset, chunk.byteLength);
-
-        if (validation.isZeroLength) return;
-        if (validation.isOutOfBounds) {
-          throw new Error(
-            `Chunk range [${chunkOffset}..${chunkOffset + chunk.byteLength}) exceeds expected size ${expectedSize}`,
-          );
-        }
-        if (validation.isConflictingOverlap) {
-          throw new Error(
-            `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunk.byteLength}`,
-          );
-        }
-        if (validation.isDuplicate) return;
-
-        writeChain = writeChain.then(async () => {
-          if (isAborted) throw new Error("Stream has been aborted");
-          if (terminalWriteError) throw terminalWriteError;
-
-          try {
-            if (typeof offset === "number" && offset !== fileCursor) {
-              await writable.seek(offset);
-              fileCursor = offset;
-            }
-            await writable.write(chunk);
-            fileCursor += chunk.byteLength;
-            bytesWritten += chunk.byteLength;
-            rangeTracker.addRange(chunkOffset, chunk.byteLength);
-          } catch (writeErr) {
-            const message = (writeErr as Error).message || "Storage quota exceeded";
-            terminalWriteError = new Error(`Disk write failed: ${message}`);
-            console.error("Destination disk write failed:", writeErr);
-            try {
-              if (typeof writable.abort === "function") {
-                await writable.abort();
-              } else {
-                await writable.close();
-              }
-            } catch {}
-            throw terminalWriteError;
-          }
-        });
-        await writeChain;
-      },
-      close: async () => {
-        if (isAborted) throw new Error("Stream has been aborted");
-        if (terminalWriteError) throw terminalWriteError;
-        if (closePromise) return closePromise;
-        closePromise = (async () => {
-          await writeChain;
-          if (terminalWriteError) throw terminalWriteError;
-
-          if (!rangeTracker.isComplete()) {
-            const missing = rangeTracker.getMissingRanges();
-            const missingStr = missing.map((m) => `[${m.start}..${m.end})`).join(", ");
-            throw new Error(
-              `Transferred byte length mismatch: missing byte ranges: ${missingStr}. Expected ${expectedSize} bytes, received ${rangeTracker.getTotalBytesReceived()} bytes.`,
-            );
-          }
-
-          try {
-            await writable.close();
-          } catch (closeErr) {
-            terminalWriteError = new Error(`Disk write failed: ${(closeErr as Error).message}`);
-            throw terminalWriteError;
-          }
-
-          const file = await userHandle.getFile();
-          if (file.size !== expectedSize) {
-            throw new Error(`Size mismatch: expected ${expectedSize} bytes, but wrote ${file.size} bytes`);
-          }
-          return file;
-        })();
-        return closePromise;
-      },
-      abort: async () => {
-        isAborted = true;
-        try {
-          if (typeof writable.abort === "function") {
-            await writable.abort();
-          } else {
-            await writable.close();
-          }
-        } catch {}
-      },
-      getBytesWritten: () => bytesWritten,
-      isComplete: () => rangeTracker.isComplete(),
-      getMissingRanges: () => rangeTracker.getMissingRanges(),
-    };
+    return createWritableStreamer(
+      writable,
+      async () => await userHandle.getFile(),
+      async () => {},
+    );
   }
 
   // Branch A2: OPFS Direct-to-Disk (when userHandle is not specified and OPFS is supported)
@@ -470,114 +616,20 @@ export async function createIncomingFileSink(
             await writable.seek(startOffset);
           }
 
-          let bytesWritten = startOffset;
-          let fileCursor = startOffset;
-          const rangeTracker = new ByteRangeTracker(expectedSize, startOffset);
-          let writeChain: Promise<void> = Promise.resolve();
-          let closePromise: Promise<File> | null = null;
-          let isAborted = false;
-          let terminalWriteError: Error | null = null;
-
-          return {
-            write: async (chunk: ArrayBuffer, offset?: number) => {
-              if (isAborted) throw new Error("Stream has been aborted");
-              if (terminalWriteError) throw terminalWriteError;
-
-              const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
-              const validation = rangeTracker.validateChunk(chunkOffset, chunk.byteLength);
-
-              if (validation.isZeroLength) return;
-              if (validation.isOutOfBounds) {
-                throw new Error(
-                  `Chunk range [${chunkOffset}..${chunkOffset + chunk.byteLength}) exceeds expected size ${expectedSize}`,
-                );
-              }
-              if (validation.isConflictingOverlap) {
-                throw new Error(
-                  `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunk.byteLength}`,
-                );
-              }
-              if (validation.isDuplicate) return;
-
-              writeChain = writeChain.then(async () => {
-                if (isAborted) throw new Error("Stream has been aborted");
-                if (terminalWriteError) throw terminalWriteError;
-
-                try {
-                  if (typeof offset === "number" && offset !== fileCursor) {
-                    await writable.seek(offset);
-                    fileCursor = offset;
-                  }
-                  await writable.write(chunk);
-                  fileCursor += chunk.byteLength;
-                  bytesWritten += chunk.byteLength;
-                  rangeTracker.addRange(chunkOffset, chunk.byteLength);
-                } catch (writeErr) {
-                  const message = (writeErr as Error).message || "Storage quota exceeded";
-                  terminalWriteError = new Error(`Disk write failed: ${message}`);
-                  console.error("OPFS disk write failed (disk full or quota exceeded):", writeErr);
-                  try {
-                    if (typeof writable.abort === "function") {
-                      await writable.abort();
-                    } else {
-                      await writable.close();
-                    }
-                  } catch {}
-                  throw terminalWriteError;
-                }
-              });
-              await writeChain;
+          return createWritableStreamer(
+            writable,
+            async () => {
+              const file = await fileHandle.getFile();
+              return new File([file], safeFileName, { type: safeMime });
             },
-            close: async () => {
-              if (isAborted) throw new Error("Stream has been aborted");
-              if (terminalWriteError) throw terminalWriteError;
-              if (closePromise) return closePromise;
-              closePromise = (async () => {
-                await writeChain;
-                if (terminalWriteError) throw terminalWriteError;
-
-                if (!rangeTracker.isComplete()) {
-                  const missing = rangeTracker.getMissingRanges();
-                  const missingStr = missing.map((m) => `[${m.start}..${m.end})`).join(", ");
-                  throw new Error(
-                    `Transferred byte length mismatch: missing byte ranges: ${missingStr}. Expected ${expectedSize} bytes, received ${rangeTracker.getTotalBytesReceived()} bytes.`,
-                  );
-                }
-
-                try {
-                  await writable.close();
-                } catch (closeErr) {
-                  terminalWriteError = new Error(`Disk write failed: ${(closeErr as Error).message}`);
-                  throw terminalWriteError;
-                }
-
-                const file = await fileHandle.getFile();
-                if (file.size !== expectedSize) {
-                  throw new Error(`Size mismatch: expected ${expectedSize} bytes, but wrote ${file.size} bytes`);
-                }
-                return new File([file], safeFileName, { type: safeMime });
-              })();
-              return closePromise;
-            },
-            abort: async () => {
-              isAborted = true;
-              try {
-                if (typeof writable.abort === "function") {
-                  await writable.abort();
-                } else {
-                  await writable.close();
-                }
-              } catch {}
+            async () => {
               if (dir) {
                 try {
                   await dir.removeEntry(storageKey);
                 } catch {}
               }
             },
-            getBytesWritten: () => bytesWritten,
-            isComplete: () => rangeTracker.isComplete(),
-            getMissingRanges: () => rangeTracker.getMissingRanges(),
-          };
+          );
         }
       }
     } catch (e) {
@@ -603,22 +655,24 @@ export async function createIncomingFileSink(
   let terminalRamError: Error | null = null;
 
   return {
-    write: async (chunk: ArrayBuffer, offset?: number) => {
+    write: async (chunk: ArrayBuffer | Uint8Array, offset?: number) => {
       if (isAborted || !memoryBuffer) throw new Error("Stream has been aborted");
       if (terminalRamError) throw terminalRamError;
 
+      const chunkView = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      const chunkLen = chunkView.byteLength;
       const chunkOffset = typeof offset === "number" ? offset : bytesWritten;
-      const validation = rangeTracker.validateChunk(chunkOffset, chunk.byteLength);
+      const validation = rangeTracker.validateChunk(chunkOffset, chunkLen);
 
       if (validation.isZeroLength) return;
       if (validation.isOutOfBounds) {
         throw new Error(
-          `Chunk range [${chunkOffset}..${chunkOffset + chunk.byteLength}) exceeds expected size ${expectedSize}`,
+          `Chunk range [${chunkOffset}..${chunkOffset + chunkLen}) exceeds expected size ${expectedSize}`,
         );
       }
       if (validation.isConflictingOverlap) {
         throw new Error(
-          `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunk.byteLength}`,
+          `Conflicting partial overlapping chunk detected at offset ${chunkOffset} with length ${chunkLen}`,
         );
       }
       if (validation.isDuplicate) return;
@@ -627,9 +681,12 @@ export async function createIncomingFileSink(
         if (isAborted || !memoryBuffer) throw new Error("Stream has been aborted");
         if (terminalRamError) throw terminalRamError;
         try {
-          memoryBuffer.set(new Uint8Array(chunk), chunkOffset);
-          bytesWritten += chunk.byteLength;
-          rangeTracker.addRange(chunkOffset, chunk.byteLength);
+          memoryBuffer.set(chunkView, chunkOffset);
+          bytesWritten += chunkLen;
+          rangeTracker.addRange(chunkOffset, chunkLen);
+          if (options?.onPersistedBytes) {
+            options.onPersistedBytes(bytesWritten);
+          }
         } catch (err) {
           terminalRamError = err instanceof Error ? err : new Error(String(err));
           throw terminalRamError;
@@ -663,7 +720,12 @@ export async function createIncomingFileSink(
       isAborted = true;
       memoryBuffer = null;
     },
+    flush: async () => {
+      await fallbackWriteChain;
+    },
     getBytesWritten: () => bytesWritten,
+    getBytesPersisted: () => bytesWritten,
+    getWriteStats: () => ({ avgLatencyMs: 0, maxLatencyMs: 0, totalWrites: 0 }),
     isComplete: () => rangeTracker.isComplete(),
     getMissingRanges: () => rangeTracker.getMissingRanges(),
   };

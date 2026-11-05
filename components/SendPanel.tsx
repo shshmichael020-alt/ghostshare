@@ -44,6 +44,8 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     startLocalFilePicker,
     endLocalFilePicker,
     transferSpeed,
+    candidatePair,
+    lastTransferSummary,
   } = useGhostSession();
 
   const [codeInput, setCodeInput] = useState(initialCode ?? activeSessionCode ?? "");
@@ -274,26 +276,54 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-container-high text-on-surface">
             <span
               className={`w-2 h-2 rounded-full ${
-                isRemoteSuspended ? "bg-amber-400 animate-pulse" : "bg-tertiary"
+                isRemoteSuspended
+                  ? "bg-amber-400 animate-pulse"
+                  : candidatePair?.pathType === "turn-relay"
+                  ? "bg-amber-400"
+                  : "bg-tertiary"
               }`}
             />
             <span className="font-body-sm font-medium">
-              {isRemoteSuspended ? "Peer is selecting files..." : "Peer Connected (P2P Direct)"}
+              {isRemoteSuspended
+                ? "Peer is selecting files..."
+                : candidatePair?.pathLabel
+                ? candidatePair.pathLabel
+                : "Peer Connected (P2P Direct)"}
             </span>
           </div>
         </div>
 
         <div className="flex items-center gap-4 font-mono-telemetry text-on-surface-variant">
+          {candidatePair?.currentRoundTripTime !== undefined && (
+            <div className="flex items-center gap-1.5 bg-surface-container px-2 py-0.5 rounded border border-white/[0.04] text-[11px]">
+              <span className="text-on-surface-variant uppercase">RTT</span>
+              <span className="text-secondary font-mono-data font-bold">
+                {Math.round(candidatePair.currentRoundTripTime * 1000)}ms
+              </span>
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <Shield size={14} className="text-secondary" />
-            <span>DTLS 1.3 Encryption</span>
+            <span>DTLS 1.3</span>
           </div>
-          <div className="flex items-center gap-1.5 bg-surface-container px-2.5 py-1 rounded border border-white/[0.04]">
-            <Radio size={14} className="text-primary" />
-            <span>STUN Traversal Active</span>
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs ${
+            candidatePair?.pathType === "turn-relay"
+              ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+              : candidatePair?.pathType === "host-to-host"
+              ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+              : "bg-surface-container text-primary border-white/[0.04]"
+          }`}>
+            <Radio size={14} />
+            <span>{candidatePair?.pathLabel || "STUN Traversal Active"}</span>
           </div>
         </div>
       </section>
+
+      {candidatePair?.pathType === "turn-relay" && (
+        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs font-mono-telemetry flex items-center justify-between gap-3">
+          <span>⚠️ Connected via Encrypted TURN Relay. If devices are on the same Wi-Fi, router AP/Client Isolation or NAT loopback restriction may be blocking direct LAN discovery.</span>
+        </div>
+      )}
 
       {/* Main Dual Column Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -517,6 +547,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 <span>Stream Protocol:</span>
                 <span className="font-mono-telemetry text-tertiary">SCTP Chunk Streaming</span>
               </div>
+              {lastTransferSummary && (
+                <div className="flex justify-between items-center text-emerald-300">
+                  <span>Last Speed:</span>
+                  <span className="font-mono-data font-bold">
+                    {lastTransferSummary.effectiveThroughputMbs.toFixed(2)} MB/s
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Action Trigger Button */}
