@@ -31,6 +31,11 @@ import {
   inspectActiveCandidatePair,
   CandidatePairStats,
   getSanitizedConnectionDiagnostic,
+  getAdaptiveChunkSize,
+  DEFAULT_HIGH_WATER_MARK,
+  DEFAULT_LOW_WATER_MARK,
+  MOBILE_HIGH_WATER_MARK,
+  MOBILE_LOW_WATER_MARK,
 } from "@/lib/webrtc";
 import {
   createIncomingFileSink,
@@ -90,6 +95,13 @@ export interface ActiveReceivingItem {
   status?: "streaming" | "verifying" | "done" | "error";
 }
 
+export interface TransferSpeedMetrics {
+  bytesPerSec: number;
+  mbps: number;
+  formattedSpeed: string;
+  rttMs?: number;
+}
+
 export interface SessionContextType {
   // Mode & navigation
   mode: SessionMode;
@@ -100,6 +112,7 @@ export interface SessionContextType {
   turnConfigured: boolean;
   candidatePair: CandidatePairStats | null;
   connectionDiagnostic: string | null;
+  transferSpeed: TransferSpeedMetrics | null;
 
   // Session metadata & connection
   role: "creator" | "joiner" | null;
@@ -272,7 +285,64 @@ export function SessionProvider({
   const [storageCapability, setStorageCapability] = useState<StorageCapability | null>(null);
   const [turnConfigured, setTurnConfigured] = useState<boolean>(false);
   const [candidatePair, setCandidatePair] = useState<CandidatePairStats | null>(null);
+  const candidatePairRef = useRef<CandidatePairStats | null>(null);
+  useEffect(() => {
+    candidatePairRef.current = candidatePair;
+  }, [candidatePair]);
+
   const [connectionDiagnostic, setConnectionDiagnostic] = useState<string | null>(null);
+  const [transferSpeed, setTransferSpeed] = useState<TransferSpeedMetrics | null>(null);
+
+  const speedCalcRef = useRef<{
+    lastBytes: number;
+    lastTime: number;
+    totalTransferred: number;
+  }>({
+    lastBytes: 0,
+    lastTime: 0,
+    totalTransferred: 0,
+  });
+
+  const updateTransferSpeed = useCallback((newTotalBytes: number) => {
+    const now = performance.now();
+    const tracker = speedCalcRef.current;
+    if (tracker.lastTime === 0) {
+      tracker.lastTime = now;
+      tracker.lastBytes = newTotalBytes;
+      tracker.totalTransferred = newTotalBytes;
+      return;
+    }
+    const elapsed = (now - tracker.lastTime) / 1000;
+    if (elapsed >= 0.2) {
+      const deltaBytes = Math.max(0, newTotalBytes - tracker.lastBytes);
+      const bytesPerSec = deltaBytes / elapsed;
+      const mbps = (bytesPerSec * 8) / (1024 * 1024);
+      const mbs = bytesPerSec / (1024 * 1024);
+      const formattedSpeed = mbs >= 1.0 ? `${mbs.toFixed(1)} MB/s` : `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+
+      let rttMs: number | undefined;
+      if (candidatePairRef.current?.currentRoundTripTime !== undefined) {
+        rttMs = Math.round(candidatePairRef.current.currentRoundTripTime * 1000);
+      }
+
+      setTransferSpeed({
+        bytesPerSec,
+        mbps,
+        formattedSpeed,
+        rttMs,
+      });
+
+      tracker.lastBytes = newTotalBytes;
+      tracker.lastTime = now;
+    }
+  }, []);
+
+  const resetTransferSpeed = useCallback(() => {
+    speedCalcRef.current = { lastBytes: 0, lastTime: 0, totalTransferred: 0 };
+    setTransferSpeed(null);
+  }, []);
+
+  const lastReceiverUiUpdateRef = useRef<number>(0);
 
   useEffect(() => {
     checkStorageCapability().then(setStorageCapability).catch(() => {});
@@ -862,9 +932,16 @@ export function SessionProvider({
       await active.streamer.write(payload, offset);
       const written = active.streamer.getBytesWritten();
       active.receivedBytes = written;
-      setActiveReceiving((prev) =>
-        prev && prev.id === fileId ? { ...prev, receivedBytes: written } : prev,
-      );
+
+      updateTransferSpeed(written);
+
+      const now = performance.now();
+      if (now - lastReceiverUiUpdateRef.current >= 100 || written >= active.meta.size) {
+        lastReceiverUiUpdateRef.current = now;
+        setActiveReceiving((prev) =>
+          prev && prev.id === fileId ? { ...prev, receivedBytes: written } : prev,
+        );
+      }
       if (active.onChunkWritten) {
         active.onChunkWritten();
       }
@@ -890,7 +967,7 @@ export function SessionProvider({
       buffered.push({ payload, offset });
       pendingChunksRef.current.set(fileId, buffered);
     }
-  }, []);
+  }, [updateTransferSpeed]);
 
   // Stable refs for event-handler dispatch to eliminate stale React closures
   const handleControlMessageRef = useRef(handleControlMessage);
@@ -1022,7 +1099,8 @@ export function SessionProvider({
     setStagedFiles([]);
     setPendingApproval(null);
     setActiveReceiving(null);
-  }, [setIsRemoteSuspended]);
+    resetTransferSpeed();
+  }, [setIsRemoteSuspended, resetTransferSpeed]);
 
   // -------------------------------------------------------------
   // Session Creation (Creator / Host Flow)
@@ -1609,12 +1687,21 @@ export function SessionProvider({
       const pending = stagedFilesRef.current.filter((f) => f.status === "requesting" || f.status === "accepted");
       let hasErrors = false;
 
+      const isMobileDevice =
+        typeof navigator !== "undefined" &&
+        /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      const chunkSize = getAdaptiveChunkSize(pcRef.current, isMobileDevice);
+      const highWaterMark = isMobileDevice ? MOBILE_HIGH_WATER_MARK : DEFAULT_HIGH_WATER_MARK;
+      const lowWaterMark = isMobileDevice ? MOBILE_LOW_WATER_MARK : DEFAULT_LOW_WATER_MARK;
+
       for (const item of pending) {
         if (!isSubscribed || cancelTransferRef.current) break;
 
         setStagedFiles((prev) =>
           prev.map((f) => (f.id === item.id ? { ...f, status: "uploading", progress: 0 } : f)),
         );
+
+        let lastSenderUiUpdate = 0;
 
         try {
           await streamFileOverDataChannel(
@@ -1624,10 +1711,16 @@ export function SessionProvider({
             0,
             (sent, total) => {
               if (!isSubscribed) return;
+              updateTransferSpeed(sent);
+
+              const now = performance.now();
               const pct = Math.min(99, Math.round((sent / total) * 100));
-              setStagedFiles((prev) =>
-                prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
-              );
+              if (now - lastSenderUiUpdate >= 100 || sent >= total) {
+                lastSenderUiUpdate = now;
+                setStagedFiles((prev) =>
+                  prev.map((f) => (f.id === item.id ? { ...f, progress: pct } : f)),
+                );
+              }
             },
             () => cancelTransferRef.current,
             ctrl,
@@ -1638,7 +1731,10 @@ export function SessionProvider({
                 prev.map((f) => (f.id === item.id ? { ...f, status: "awaiting-verification", progress: 100 } : f)),
               );
             },
+            { chunkSize, highWaterMark, lowWaterMark },
           );
+
+          resetTransferSpeed();
 
           if (!isSubscribed) return;
           setStagedFiles((prev) =>
@@ -1647,6 +1743,7 @@ export function SessionProvider({
           pushToast(`${item.name} transferred directly!`, "success");
         } catch (err) {
           hasErrors = true;
+          resetTransferSpeed();
           if (!isSubscribed) return;
           const msg = (err as Error).message || "Streaming interrupted";
           setStagedFiles((prev) =>
@@ -1675,7 +1772,7 @@ export function SessionProvider({
     return () => {
       isSubscribed = false;
     };
-  }, [outboundPhase, pushToast]);
+  }, [outboundPhase, pushToast, resetTransferSpeed, updateTransferSpeed]);
 
   // -------------------------------------------------------------
   // Inbound Transfer Actions (Receiving)
@@ -1972,6 +2069,22 @@ export function SessionProvider({
     };
   }, [connStatus]);
 
+  // Periodic candidate pair stats inspection while connected
+  useEffect(() => {
+    if (connStatus !== "connected") return;
+    const interval = setInterval(async () => {
+      const pc = pcRef.current;
+      if (pc && (pc.connectionState === "connected" || pc.iceConnectionState === "connected")) {
+        const pair = await inspectActiveCandidatePair(pc);
+        if (pair) {
+          candidatePairRef.current = pair;
+          setCandidatePair(pair);
+        }
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [connStatus]);
+
   // Mobile Lifecycle & Tab Visibility Management
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
@@ -2026,6 +2139,7 @@ export function SessionProvider({
         turnConfigured,
         candidatePair,
         connectionDiagnostic,
+        transferSpeed,
         startHostSession,
         joinGuestSession,
         disconnectSession,

@@ -56,11 +56,16 @@ export interface CandidatePairStats {
   remoteCandidateType: string;
   protocol?: string;
   isRelayed: boolean;
+  currentRoundTripTime?: number;
+  availableOutgoingBitrate?: number;
+  bytesSent?: number;
+  bytesReceived?: number;
 }
 
 /**
  * Inspects active candidate pair using standard RTCPeerConnection.getStats()
  * to determine whether the connection path is direct P2P or relayed via TURN.
+ * Accurately inspects selected transport and candidate-pair reports with latency and bandwidth telemetry.
  */
 export async function inspectActiveCandidatePair(
   pc: RTCPeerConnection,
@@ -70,14 +75,48 @@ export async function inspectActiveCandidatePair(
     const stats = await pc.getStats();
     let selectedPairReport: Record<string, unknown> | null = null;
 
+    // 1. Standards-compliant transport inspection
     for (const report of stats.values()) {
       const r = report as Record<string, unknown>;
-      if (
-        r.type === "candidate-pair" &&
-        (r.selected === true || r.nominated === true || r.state === "succeeded")
-      ) {
-        selectedPairReport = r;
-        break;
+      if (r.type === "transport" && typeof r.selectedCandidatePairId === "string") {
+        const pair = stats.get(r.selectedCandidatePairId) as Record<string, unknown> | undefined;
+        if (pair) {
+          selectedPairReport = pair;
+          break;
+        }
+      }
+    }
+
+    // 2. Fallback to candidate-pair where selected === true
+    if (!selectedPairReport) {
+      for (const report of stats.values()) {
+        const r = report as Record<string, unknown>;
+        if (r.type === "candidate-pair" && r.selected === true) {
+          selectedPairReport = r;
+          break;
+        }
+      }
+    }
+
+    // 3. Fallback to candidate-pair where nominated === true
+    if (!selectedPairReport) {
+      for (const report of stats.values()) {
+        const r = report as Record<string, unknown>;
+        if (r.type === "candidate-pair" && r.nominated === true) {
+          selectedPairReport = r;
+          break;
+        }
+      }
+    }
+
+    // 4. Fallback to any succeeded candidate-pair if none yet explicitly nominated
+    if (!selectedPairReport) {
+      for (const report of stats.values()) {
+        const r = report as Record<string, unknown>;
+        if (r.type === "candidate-pair" && r.state === "succeeded") {
+          selectedPairReport = r;
+          break;
+        }
       }
     }
 
@@ -100,11 +139,30 @@ export async function inspectActiveCandidatePair(
       : "unknown";
     const isRelayed = localCandidateType === "relay" || remoteCandidateType === "relay";
 
+    const currentRoundTripTime =
+      typeof pair.currentRoundTripTime === "number"
+        ? pair.currentRoundTripTime
+        : typeof pair.roundTripTime === "number"
+        ? pair.roundTripTime
+        : undefined;
+
+    const availableOutgoingBitrate =
+      typeof pair.availableOutgoingBitrate === "number"
+        ? pair.availableOutgoingBitrate
+        : undefined;
+
+    const bytesSent = typeof pair.bytesSent === "number" ? pair.bytesSent : undefined;
+    const bytesReceived = typeof pair.bytesReceived === "number" ? pair.bytesReceived : undefined;
+
     return {
       localCandidateType,
       remoteCandidateType,
       protocol,
       isRelayed,
+      currentRoundTripTime,
+      availableOutgoingBitrate,
+      bytesSent,
+      bytesReceived,
     };
   } catch {
     return null;
@@ -160,8 +218,40 @@ export async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 600
   });
 }
 
-export const CHUNK_SIZE = 32 * 1024; // 32 KB chunk size for safe SCTP MTU traversal
-export const MAX_BUFFERED_AMOUNT = 256 * 1024; // 256 KB high-water mark for backpressure
+// High-performance streaming constants
+export const DEFAULT_CHUNK_SIZE = 128 * 1024; // 128 KB standard chunk size
+export const MOBILE_CHUNK_SIZE = 64 * 1024;   // 64 KB mobile chunk size for memory & MTU safety
+export const MAX_CHUNK_SIZE = 256 * 1024;     // 256 KB max chunk size
+export const MIN_CHUNK_SIZE = 32 * 1024;      // 32 KB minimum chunk size
+export const CHUNK_SIZE = 32 * 1024;          // Preserved for backward compatibility
+
+export const DEFAULT_HIGH_WATER_MARK = 1024 * 1024; // 1 MB high-water mark for deep network socket queues
+export const DEFAULT_LOW_WATER_MARK = 256 * 1024;   // 256 KB low-water mark for event-driven drain resumption
+export const MOBILE_HIGH_WATER_MARK = 512 * 1024;  // 512 KB high-water mark for mobile
+export const MOBILE_LOW_WATER_MARK = 128 * 1024;   // 128 KB low-water mark for mobile
+export const MAX_BUFFERED_AMOUNT = 256 * 1024;      // Preserved for backward compatibility
+
+/**
+ * Calculates the optimal adaptive chunk size based on platform environment
+ * and WebRTC SCTP maximum message size attributes.
+ */
+export function getAdaptiveChunkSize(pc?: RTCPeerConnection | null, isMobile?: boolean): number {
+  if (isMobile) {
+    return MOBILE_CHUNK_SIZE;
+  }
+  if (pc && pc.sctp && typeof pc.sctp.maxMessageSize === "number" && pc.sctp.maxMessageSize > 0) {
+    // Binary framing overhead is ~85 bytes max; leave safety margin
+    const safeMax = Math.max(MIN_CHUNK_SIZE, pc.sctp.maxMessageSize - 1024);
+    if (safeMax < DEFAULT_CHUNK_SIZE) {
+      return Math.max(MIN_CHUNK_SIZE, safeMax);
+    }
+    if (safeMax >= MAX_CHUNK_SIZE) {
+      return MAX_CHUNK_SIZE;
+    }
+    return DEFAULT_CHUNK_SIZE;
+  }
+  return DEFAULT_CHUNK_SIZE;
+}
 
 export const DATA_CHANNEL_LABELS = {
   CONTROL: "control",
@@ -302,9 +392,9 @@ export function encodeBinaryFrame(
   chunkIndex: number,
   offset: number,
   payload: ArrayBuffer,
+  preEncodedIdBytes?: Uint8Array,
 ): ArrayBuffer {
-  const enc = new TextEncoder();
-  const idBytes = enc.encode(fileId);
+  const idBytes = preEncodedIdBytes || new TextEncoder().encode(fileId);
   if (idBytes.length > 255) {
     throw new Error("File ID exceeds 255 bytes limit");
   }
@@ -392,48 +482,83 @@ export function createPeerConnection(customIceServers?: RTCIceServer[]): RTCPeer
 
 /**
  * Sends a binary chunk across RTCDataChannel respecting backpressure.
- * If bufferedAmount exceeds MAX_BUFFERED_AMOUNT, halts sending until bufferedamountlow triggers.
+ * If bufferedAmount exceeds highWaterMark, halts sending until bufferedamountlow triggers.
+ * Includes immediate threshold recheck and failsafe watchdog timer.
  */
 export async function sendChunkWithBackpressure(
   channel: RTCDataChannel,
   chunk: ArrayBuffer,
+  highWaterMark: number = DEFAULT_HIGH_WATER_MARK,
+  lowWaterMark: number = DEFAULT_LOW_WATER_MARK,
 ): Promise<void> {
   if (channel.readyState !== "open") {
     throw new Error("Data channel is closed");
   }
 
   // Ensure threshold is configured for browser notification
-  if (channel.bufferedAmountLowThreshold === 0) {
-    channel.bufferedAmountLowThreshold = 64 * 1024;
+  if (channel.bufferedAmountLowThreshold !== lowWaterMark) {
+    channel.bufferedAmountLowThreshold = lowWaterMark;
   }
 
   // If buffer is above high-water mark, wait for drain or failsafe timeout
-  while (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+  while (channel.bufferedAmount > highWaterMark) {
     if (channel.readyState !== "open") {
       throw new Error("Data channel closed while waiting for buffer to drain");
     }
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       const onLow = () => {
-        if (timer) clearTimeout(timer);
-        channel.removeEventListener("bufferedamountlow", onLow);
+        cleanup();
         resolve();
       };
-      channel.addEventListener("bufferedamountlow", onLow);
-      timer = setTimeout(() => {
+      const onClose = () => {
+        cleanup();
+        reject(new Error("Data channel closed while waiting for buffer to drain"));
+      };
+      const onError = (e: Event) => {
+        cleanup();
+        reject(new Error(`Data channel error while waiting for buffer to drain: ${String(e)}`));
+      };
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
         channel.removeEventListener("bufferedamountlow", onLow);
+        channel.removeEventListener("close", onClose);
+        channel.removeEventListener("error", onError);
+      };
+
+      channel.addEventListener("bufferedamountlow", onLow);
+      channel.addEventListener("close", onClose);
+      channel.addEventListener("error", onError);
+
+      // Immediate re-check after registering listener to eliminate race condition
+      if (channel.bufferedAmount <= lowWaterMark) {
+        cleanup();
         resolve();
-      }, 30);
+        return;
+      }
+
+      // Failsafe watchdog timer (250 ms)
+      timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, 250);
     });
   }
 
   channel.send(chunk);
 }
 
+export interface StreamFileOptions {
+  chunkSize?: number;
+  highWaterMark?: number;
+  lowWaterMark?: number;
+}
+
 /**
  * Streams a single File chunk-by-chunk across RTCDataChannel.
  * Slices the file on demand so large payloads never saturate browser RAM.
+ * Uses pipelined read-ahead (2 chunks in flight) so disk I/O and network transmission overlap.
  * Frames each chunk with structured metadata and enforces explicit readiness and write acknowledgements.
  * Control messages (signals) can optionally use a dedicated controlChannel to avoid backpressure head-of-line blocking.
  */
@@ -447,6 +572,7 @@ export async function streamFileOverDataChannel(
   controlChannel?: RTCDataChannel,
   batchId?: string,
   onAwaitingVerification?: () => void,
+  options?: StreamFileOptions,
 ): Promise<void> {
   const ctrl = controlChannel || channel;
   if (channel.readyState !== "open") {
@@ -532,7 +658,25 @@ export async function streamFileOverDataChannel(
     return;
   }
 
-  // Stream binary slices with backpressure flow control and framed metadata
+  const effectiveChunkSize = options?.chunkSize || DEFAULT_CHUNK_SIZE;
+  const highWaterMark = options?.highWaterMark || DEFAULT_HIGH_WATER_MARK;
+  const lowWaterMark = options?.lowWaterMark || DEFAULT_LOW_WATER_MARK;
+  const preEncodedIdBytes = new TextEncoder().encode(fileId);
+
+  // Helper to read chunk arrayBuffer asynchronously
+  const readChunk = (sliceStart: number, sliceEnd: number): Promise<ArrayBuffer> => {
+    return file.slice(sliceStart, sliceEnd).arrayBuffer();
+  };
+
+  let nextReadOffset = offset;
+  let nextChunkPromise: Promise<ArrayBuffer> | null = null;
+  if (nextReadOffset < total) {
+    const end = Math.min(nextReadOffset + effectiveChunkSize, total);
+    nextChunkPromise = readChunk(nextReadOffset, end);
+    nextReadOffset = end;
+  }
+
+  // Stream binary slices with backpressure flow control, read-ahead pipelining, and framed metadata
   let chunkIndex = 0;
   while (offset < total) {
     if (isCancelled()) {
@@ -543,20 +687,35 @@ export async function streamFileOverDataChannel(
       throw new Error(`Data channel [${channel.label}] closed during file streaming`);
     }
 
-    const end = Math.min(offset + CHUNK_SIZE, total);
-    const slice = file.slice(offset, end);
-    const rawBuffer = await slice.arrayBuffer();
+    const rawBuffer = nextChunkPromise
+      ? await nextChunkPromise
+      : await readChunk(offset, Math.min(offset + effectiveChunkSize, total));
 
-    // Frame the binary chunk with fileId, chunkIndex, and byte offset for concurrent routing safety
-    const framedChunk = encodeBinaryFrame(fileId, chunkIndex, offset, rawBuffer);
-    await sendChunkWithBackpressure(channel, framedChunk);
+    const chunkLen = rawBuffer.byteLength;
+    const currentChunkOffset = offset;
+    offset += chunkLen;
 
-    offset = end;
+    // Immediately trigger read-ahead for the next chunk so disk read overlaps with socket transmission
+    if (nextReadOffset < total) {
+      const nextEnd = Math.min(nextReadOffset + effectiveChunkSize, total);
+      nextChunkPromise = readChunk(nextReadOffset, nextEnd);
+      nextReadOffset = nextEnd;
+    } else {
+      nextChunkPromise = null;
+    }
+
+    // Frame the binary chunk with cached fileId bytes
+    const framedChunk = encodeBinaryFrame(fileId, chunkIndex, currentChunkOffset, rawBuffer, preEncodedIdBytes);
+    await sendChunkWithBackpressure(channel, framedChunk, highWaterMark, lowWaterMark);
+
     chunkIndex++;
     onProgress(offset, total);
   }
 
   // Ensure all queued binary chunks are completely flushed from the data channel buffer
+  if (channel.bufferedAmountLowThreshold !== 0) {
+    channel.bufferedAmountLowThreshold = 0;
+  }
   while (channel.bufferedAmount > 0) {
     if (channel.readyState !== "open") break;
     await new Promise<void>((resolve) => {
@@ -567,10 +726,16 @@ export async function streamFileOverDataChannel(
         resolve();
       };
       channel.addEventListener("bufferedamountlow", onLow);
+      if (channel.bufferedAmount === 0) {
+        if (timer) clearTimeout(timer);
+        channel.removeEventListener("bufferedamountlow", onLow);
+        resolve();
+        return;
+      }
       timer = setTimeout(() => {
         channel.removeEventListener("bufferedamountlow", onLow);
         resolve();
-      }, 30);
+      }, 50);
     });
   }
 

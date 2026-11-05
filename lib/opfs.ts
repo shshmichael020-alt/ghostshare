@@ -350,6 +350,7 @@ export async function createIncomingFileSink(
     }
 
     let bytesWritten = startOffset;
+    let fileCursor = startOffset;
     const rangeTracker = new ByteRangeTracker(expectedSize, startOffset);
     let writeChain: Promise<void> = Promise.resolve();
     let closePromise: Promise<File> | null = null;
@@ -382,10 +383,12 @@ export async function createIncomingFileSink(
           if (terminalWriteError) throw terminalWriteError;
 
           try {
-            if (typeof offset === "number") {
+            if (typeof offset === "number" && offset !== fileCursor) {
               await writable.seek(offset);
+              fileCursor = offset;
             }
             await writable.write(chunk);
+            fileCursor += chunk.byteLength;
             bytesWritten += chunk.byteLength;
             rangeTracker.addRange(chunkOffset, chunk.byteLength);
           } catch (writeErr) {
@@ -468,6 +471,7 @@ export async function createIncomingFileSink(
           }
 
           let bytesWritten = startOffset;
+          let fileCursor = startOffset;
           const rangeTracker = new ByteRangeTracker(expectedSize, startOffset);
           let writeChain: Promise<void> = Promise.resolve();
           let closePromise: Promise<File> | null = null;
@@ -500,10 +504,12 @@ export async function createIncomingFileSink(
                 if (terminalWriteError) throw terminalWriteError;
 
                 try {
-                  if (typeof offset === "number") {
+                  if (typeof offset === "number" && offset !== fileCursor) {
                     await writable.seek(offset);
+                    fileCursor = offset;
                   }
                   await writable.write(chunk);
+                  fileCursor += chunk.byteLength;
                   bytesWritten += chunk.byteLength;
                   rangeTracker.addRange(chunkOffset, chunk.byteLength);
                 } catch (writeErr) {

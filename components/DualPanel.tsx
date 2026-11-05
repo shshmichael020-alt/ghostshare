@@ -66,6 +66,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
     downloadAllFiles,
     storageCapability,
     candidatePair,
+    transferSpeed,
     pushToast,
     isRemoteSuspended,
     startLocalFilePicker,
@@ -570,7 +571,12 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                       <p className="truncate font-medium text-on-surface">{item.name}</p>
                       <p className="text-[10px] text-on-surface-variant font-mono-telemetry">
                         {formatSize(item.size)}
-                        {item.status === "uploading" && ` • ${item.progress}%`}
+                        {item.status === "uploading" && (
+                          <>
+                            {` • ${item.progress}%`}
+                            {transferSpeed && ` • ${transferSpeed.formattedSpeed}`}
+                          </>
+                        )}
                         {item.status === "awaiting-verification" && ` • Verifying...`}
                         {item.status === "requesting" && ` • Awaiting approval`}
                         {item.status === "accepted" && ` • Accepted`}
@@ -813,6 +819,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                 </span>
                 <span className="font-mono-telemetry text-[11px] text-on-surface-variant shrink-0">
                   {formatSize(activeReceiving.receivedBytes)} / {formatSize(activeReceiving.size)}
+                  {transferSpeed && ` • ${transferSpeed.formattedSpeed}`}
                 </span>
               </div>
               <div className="w-full bg-surface-container-lowest rounded-full h-1.5 overflow-hidden border border-white/[0.05]">

@@ -60,6 +60,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
     turnConfigured,
     candidatePair,
     connectionDiagnostic,
+    transferSpeed,
     isRemoteSuspended,
   } = useGhostSession();
 
@@ -572,6 +573,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   <span className="font-mono-telemetry text-secondary text-xs">
                     {formatSize(activeReceiving.receivedBytes)} / {formatSize(activeReceiving.size)} (
                     {Math.round((activeReceiving.receivedBytes / activeReceiving.size) * 100)}%)
+                    {transferSpeed && ` • ${transferSpeed.formattedSpeed}`}
                   </span>
                 </div>
                 <div className="w-full h-2 rounded-full bg-surface-container-highest overflow-hidden">

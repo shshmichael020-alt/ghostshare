@@ -43,6 +43,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
     isRemoteSuspended,
     startLocalFilePicker,
     endLocalFilePicker,
+    transferSpeed,
   } = useGhostSession();
 
   const [codeInput, setCodeInput] = useState(initialCode ?? activeSessionCode ?? "");
@@ -439,6 +440,12 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                               {item.status === "uploading" && (
                                 <>
                                   <Loader2 size={12} className="animate-spin" /> Streaming ({item.progress}%)
+                                  {transferSpeed && (
+                                    <span className="font-mono-telemetry text-secondary text-[11px] font-normal ml-1">
+                                      • {transferSpeed.formattedSpeed}
+                                      {transferSpeed.rttMs !== undefined ? ` • ${transferSpeed.rttMs}ms RTT` : ""}
+                                    </span>
+                                  )}
                                 </>
                               )}
                               {item.status === "awaiting-verification" && (
