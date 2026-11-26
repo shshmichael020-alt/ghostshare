@@ -116,13 +116,13 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
         {/* Live Status indicator */}
         <div className="flex items-center gap-2.5 self-start md:self-auto">
-          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-surface-container-high border border-white/[0.06] shadow-sm">
+          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-surface-container-high border border-border-default shadow-sm transition-colors duration-200">
             <span className="relative flex h-2 w-2">
               <span
                 className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
                   connStatus === "connected"
                     ? isRemoteSuspended
-                      ? "bg-amber-400"
+                      ? "bg-warning"
                       : "bg-tertiary"
                     : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
@@ -135,7 +135,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 className={`relative inline-flex rounded-full h-2 w-2 ${
                   connStatus === "connected"
                     ? isRemoteSuspended
-                      ? "bg-amber-400"
+                      ? "bg-warning"
                       : "bg-tertiary"
                     : connStatus === "connecting" || connStatus === "reconnecting"
                     ? "bg-primary"
@@ -149,7 +149,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               className={`font-mono-telemetry font-medium ${
                 connStatus === "connected"
                   ? isRemoteSuspended
-                    ? "text-amber-400"
+                    ? "text-warning"
                     : "text-tertiary"
                   : connStatus === "connecting"
                   ? "text-primary"
@@ -219,14 +219,14 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             </span>
           </div>
 
-          <div className="bg-surface-container rounded-xl p-3 max-h-56 overflow-y-auto flex flex-col gap-2.5 border border-white/[0.04]">
+          <div className="bg-surface-container rounded-xl p-3 max-h-56 overflow-y-auto flex flex-col gap-2.5 border border-border-subtle">
             {pendingApproval.files.map((file) => {
               const destName = selectedDestinations?.[file.id];
               const isLarge = file.size > 100 * 1024 * 1024;
               const isRam = !storageCapability?.isOpfsSupported;
 
               return (
-                <div key={file.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-lg bg-surface-container-high/60 border border-white/[0.03]">
+                <div key={file.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-lg bg-surface-container-high/60 border border-border-subtle">
                   <div className="flex flex-col min-w-0 pr-2">
                     <span className="text-on-surface font-medium truncate text-xs sm:text-sm">{file.name}</span>
                     <span className="font-mono-telemetry text-on-surface-variant text-[11px]">{formatSize(file.size)}</span>
@@ -250,8 +250,8 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                         onClick={() => selectDestinationForFile(file.id)}
                         className={`px-2.5 py-1 rounded text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border ${
                           isRam && isLarge
-                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 animate-pulse"
-                            : "bg-surface-container-highest hover:bg-white/[0.12] text-on-surface border-white/[0.06]"
+                            ? "bg-warning-container text-warning border-warning-border hover:bg-warning-container animate-pulse"
+                            : "bg-surface-container-highest hover:bg-surface-hover text-on-surface border-border-default"
                         }`}
                         title="Choose a specific destination file on local disk"
                       >
@@ -287,7 +287,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
             return (
               <div className="space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between text-xs text-on-surface-variant font-mono-telemetry bg-surface-container/60 p-2.5 rounded-lg border border-white/[0.04] gap-2">
+                <div className="flex flex-wrap items-center justify-between text-xs text-on-surface-variant font-mono-telemetry bg-surface-container/60 p-2.5 rounded-lg border border-border-subtle gap-2">
                   <span className="flex items-center gap-1.5">
                     <HardDrive size={13} className="text-secondary" />
                     Storage Engine: <strong className="text-on-surface">{engineLabel}</strong>
@@ -298,7 +298,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 </div>
 
                 {isRamFallback && hasLargeFile && (
-                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 flex items-start gap-2.5 text-xs">
+                  <div className="p-3 rounded-lg bg-warning-container border border-warning-border text-warning flex items-start gap-2.5 text-xs">
                     <AlertTriangle size={16} className="shrink-0 mt-0.5" />
                     <div className="flex flex-col gap-1">
                       <span className="font-semibold">Large File Detected (&gt; 100 MB) without OPFS</span>
@@ -326,7 +326,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
             <button
               onClick={handleDeclineTransfer}
-              className="px-4 py-2 rounded-lg bg-surface-container-lowest hover:bg-surface-container text-on-surface-variant hover:text-error transition-colors font-body-sm flex items-center gap-1.5 border border-white/[0.06] cursor-pointer"
+              className="px-4 py-2 rounded-lg bg-surface-container-lowest hover:bg-surface-container text-on-surface-variant hover:text-error transition-colors font-body-sm flex items-center gap-1.5 border border-border-default cursor-pointer"
             >
               <XCircle size={16} />
               <span>Decline</span>
@@ -337,7 +337,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               !selectedDestinations?.[pendingApproval.files[0].id] && (
                 <button
                   onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile(pendingApproval.files[0].id)}
-                  className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors flex items-center gap-1.5 border border-white/[0.08] cursor-pointer shadow-sm"
+                  className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors flex items-center gap-1.5 border border-border-default cursor-pointer shadow-sm"
                   title="Select a local destination file and immediately accept stream"
                 >
                   <HardDrive size={16} className="text-secondary" />
@@ -358,7 +358,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
 
       {expired ? (
         /* Expired Session State */
-        <div className="p-8 sm:p-12 rounded-2xl bg-surface-container-low border border-white/[0.08] shadow-xl flex flex-col items-center justify-center text-center gap-4">
+        <div className="p-8 sm:p-12 rounded-2xl bg-surface-container-low border border-border-default shadow-xl flex flex-col items-center justify-center text-center gap-4 transition-colors duration-200">
           <div className="w-12 h-12 rounded-full bg-error-container/20 border border-error/30 flex items-center justify-center text-error">
             <RefreshCw size={22} />
           </div>
@@ -381,7 +381,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         <div className="flex flex-col gap-5">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
             {/* Left Hero: Monospace Pairing Code Card */}
-            <div className="lg:col-span-7 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col justify-between border border-white/[0.08] shadow-xl relative overflow-hidden">
+            <div className="lg:col-span-7 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col justify-between border border-border-default shadow-xl relative overflow-hidden transition-colors duration-200">
               <div className="absolute -right-16 -top-16 w-48 h-48 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
 
               <div className="flex flex-col gap-4">
@@ -394,7 +394,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                   </div>
 
                   {/* Countdown pill with dynamic ring */}
-                  <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-highest border border-white/[0.06] shadow-sm">
+                  <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-highest border border-border-default shadow-sm">
                     <svg className="w-3.5 h-3.5 -rotate-90" viewBox="0 0 24 24">
                       <circle
                         className="text-surface-container"
@@ -426,7 +426,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                 {/* Segmented Pin Display Component */}
                 <PinDisplay code={code} onCopy={copyLink} />
 
-                <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-white/[0.04]">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-on-surface-variant pt-1 border-t border-border-subtle">
                   <span className="font-mono-telemetry">TRANSPORT: WebRTC DataChannel (SCTP)</span>
                   <span className="font-mono-telemetry text-tertiary">
                     {isOpfsSupported() ? "OPFS DISK STREAMING" : "BLOB RAM CACHE"}
@@ -443,19 +443,19 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             </div>
 
             {/* Right Hero: High-Precision QR Code Card */}
-            <div className="lg:col-span-5 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col items-center justify-between border border-white/[0.08] shadow-xl">
+            <div className="lg:col-span-5 rounded-2xl bg-surface-container-low p-6 sm:p-8 flex flex-col items-center justify-between border border-border-default shadow-xl transition-colors duration-200">
               <div className="w-full flex items-center justify-between">
                 <span className="font-label-caps text-on-surface-variant flex items-center gap-1.5 uppercase">
                   <QrCode size={16} className="text-secondary" />
                   Direct Device Link
                 </span>
-                <span className="font-mono-telemetry text-outline bg-surface-container px-2 py-0.5 rounded">
+                <span className="font-mono-telemetry text-outline bg-surface-container px-2 py-0.5 rounded border border-border-subtle">
                   AUTO-SYNC
                 </span>
               </div>
 
               {/* QR Canvas Container with strict high-contrast compliance */}
-              <div className="my-5 p-4 bg-white rounded-2xl shadow-2xl flex flex-col items-center justify-center transition-transform hover:scale-[1.02]">
+              <div className="my-5 p-4 bg-white rounded-2xl border border-border-default shadow-xl flex flex-col items-center justify-center transition-transform hover:scale-[1.02]">
                 {code ? (
                   <QRCodeSVG
                     value={qrValue}
@@ -474,14 +474,14 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               <div className="w-full flex items-center justify-center gap-2">
                 <button
                   onClick={copyLink}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-border-default"
                 >
                   {copiedLink ? <Check size={14} className="text-tertiary" /> : <Copy size={14} />}
                   <span>{copiedLink ? "Link Copied" : "Copy Link"}</span>
                 </button>
                 <button
                   onClick={shareLink}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-white/[0.06]"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm transition-colors cursor-pointer border border-border-default"
                 >
                   <Share2 size={14} />
                   <span>Share URL</span>
@@ -491,7 +491,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
           </div>
 
           {/* User Expiry Configuration Bar (Default 1 Hour) */}
-          <div className="p-4 rounded-xl bg-surface-container-low border border-white/[0.06] flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm">
+          <div className="p-4 rounded-xl bg-surface-container-low border border-border-default flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm transition-colors duration-200">
             <div className="flex items-center gap-2">
               <Clock size={16} className="text-secondary" />
               <span className="font-body-sm text-on-surface font-medium">Session Expiration Window:</span>
@@ -520,7 +520,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         /* STAGE B: Active Live Incoming Stream & Downloads Hub */
         <div className="flex flex-col gap-6">
           {/* Bento Overview Card */}
-          <div className="bg-surface-container-low rounded-2xl p-6 sm:p-7 border border-white/[0.08] shadow-xl flex flex-col gap-5">
+          <div className="bg-surface-container-low rounded-2xl p-6 sm:p-7 border border-border-default shadow-xl flex flex-col gap-5 transition-colors duration-200">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div className="flex items-center gap-3">
                 <div className="p-2.5 rounded-xl bg-secondary/10 text-secondary border border-secondary/20 flex items-center justify-center">
@@ -588,14 +588,14 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
             )}
 
             {/* Low-Level Telemetry Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/[0.06]">
-              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-border-default">
+              <div className="bg-surface-container px-3 py-2 rounded-lg border border-border-subtle">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Connection</span>
                 <span className={`font-mono-telemetry truncate block ${
                   candidatePair?.pathType === "turn-relay"
-                    ? "text-amber-300"
+                    ? "text-warning"
                     : candidatePair?.pathType === "host-to-host"
-                    ? "text-emerald-300"
+                    ? "text-success"
                     : "text-on-surface"
                 }`}>
                   {candidatePair?.pathLabel || (candidatePair
@@ -607,19 +607,19 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
                     : "Direct STUN")}
                 </span>
               </div>
-              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
+              <div className="bg-surface-container px-3 py-2 rounded-lg border border-border-subtle">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Storage Engine</span>
                 <span className="font-mono-telemetry text-tertiary truncate block">
                   {storageCapability?.isOpfsSupported ? "OPFS Direct Disk" : "RAM Buffer (100MB Max)"}
                 </span>
               </div>
-              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
+              <div className="bg-surface-container px-3 py-2 rounded-lg border border-border-subtle">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Free Quota</span>
                 <span className="font-mono-telemetry text-on-surface truncate block">
                   {storageCapability?.available !== undefined ? formatSize(storageCapability.available) : "Unbounded / Local"}
                 </span>
               </div>
-              <div className="bg-surface-container px-3 py-2 rounded-lg border border-white/[0.04]">
+              <div className="bg-surface-container px-3 py-2 rounded-lg border border-border-subtle">
                 <span className="font-label-caps text-on-surface-variant uppercase block">Retention Window</span>
                 <span className="font-mono-telemetry text-secondary truncate block">
                   {remaining !== null ? `${formatCountdown(remaining)} remaining` : "1 Hour Default"}
@@ -646,10 +646,10 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
               {receivedFiles.map((file) => (
                 <div
                   key={file.id}
-                  className="bg-surface-container-low hover:bg-surface-container transition-all rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-white/[0.06] shadow-sm"
+                  className="bg-surface-container-low hover:bg-surface-container transition-all rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-border-default shadow-sm"
                 >
                   <div className="flex items-start gap-3.5 min-w-0">
-                    <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-white/[0.06]">
+                    <div className="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center shrink-0 border border-border-default">
                       <FileTypeIcon filename={file.name} size={22} />
                     </div>
                     <div className="flex flex-col min-w-0 gap-1">
@@ -688,7 +688,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
       )}
 
       {/* Footer Specs Quick Link */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-white/[0.04] text-on-surface-variant font-body-sm">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-border-subtle text-on-surface-variant font-body-sm">
         <div className="flex items-center gap-2">
           <ShieldCheck size={16} className="text-secondary" />
           <span>Direct P2P DataChannels · OPFS Disk Streaming · 1-Hour Default TTL</span>
@@ -696,7 +696,7 @@ export default function ReceivePanel({ onOpenSecurity }: ReceivePanelProps) {
         {onOpenSecurity && (
           <button
             onClick={onOpenSecurity}
-            className="text-xs font-mono-telemetry text-primary hover:text-primary-fixed transition-colors flex items-center gap-1 cursor-pointer"
+            className="text-xs font-mono-telemetry text-primary hover:text-primary-container hover:underline transition-colors flex items-center gap-1 cursor-pointer"
           >
             <span>View Architecture Specifications</span>
             <ExternalLink size={12} />

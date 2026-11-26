@@ -26,15 +26,15 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop backdrop-blur-md">
       <div
-        className="w-full max-w-2xl bg-surface-container rounded-2xl border border-white/[0.1] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+        className="w-full max-w-2xl bg-surface-container rounded-2xl border border-border-default shadow-2xl overflow-hidden flex flex-col max-h-[90vh] transition-colors duration-200"
         role="dialog"
         aria-modal="true"
         aria-labelledby="security-specs-title"
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-white/[0.08] bg-surface-container-high/60">
+        <div className="flex items-center justify-between p-5 border-b border-border-default bg-surface-container-high/60">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
               <Shield size={18} />
@@ -121,7 +121,7 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
 
           {/* Section 4: Memory Safety & Backpressure */}
           <div className="flex gap-4 items-start">
-            <div className="w-9 h-9 rounded-xl bg-surface-container-high border border-white/[0.08] flex items-center justify-center text-on-surface shrink-0 mt-0.5">
+            <div className="w-9 h-9 rounded-xl bg-surface-container-high border border-border-default flex items-center justify-center text-on-surface shrink-0 mt-0.5">
               <Zap size={18} />
             </div>
             <div className="space-y-1">
@@ -141,7 +141,7 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
           </div>
 
           {/* Verification checklist */}
-          <div className="p-4 rounded-xl bg-surface-container-low border border-white/[0.06] space-y-2">
+          <div className="p-4 rounded-xl bg-surface-container-low border border-border-default space-y-2">
             <span className="font-label-caps text-on-surface-variant">SECURITY CONTROLS SUMMARY</span>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono-telemetry">
               <div className="flex items-center gap-1.5 text-tertiary">
@@ -161,10 +161,10 @@ export default function SecurityModal({ isOpen, onClose }: SecurityModalProps) {
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-white/[0.08] bg-surface-container-high/40 flex justify-end">
+        <div className="p-4 border-t border-border-default bg-surface-container-high/40 flex justify-end">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors cursor-pointer border border-white/[0.08]"
+            className="px-4 py-2 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors cursor-pointer border border-border-default"
           >
             Acknowledge & Close
           </button>

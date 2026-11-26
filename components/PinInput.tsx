@@ -111,7 +111,7 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
           type="button"
           onClick={pasteFromClipboard}
           disabled={disabled}
-          className="flex items-center gap-1 text-[11px] sm:text-xs font-mono-telemetry text-secondary hover:text-secondary-fixed transition-colors cursor-pointer bg-surface-container-high px-2 py-1 rounded border border-white/[0.04]"
+          className="flex items-center gap-1 text-[11px] sm:text-xs font-mono-telemetry text-secondary hover:text-secondary-fixed transition-colors cursor-pointer bg-surface-container-high px-2 py-1 rounded border border-border-subtle"
         >
           <Clipboard size={12} />
           <span>Paste Code</span>
@@ -136,7 +136,7 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
+              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-border-default focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
               aria-label={`Digit ${i + 1}`}
             />
           ))}
@@ -161,7 +161,7 @@ export default function PinInput({ value, onChange, onComplete, disabled }: PinI
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               onPaste={handlePaste}
-              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-white/[0.08] focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
+              className="w-full max-w-[38px] aspect-[4/5] bg-surface-container-lowest text-center font-mono-pairing-code text-base sm:text-lg text-on-surface rounded-lg border border-border-default focus:border-secondary focus:ring-2 focus:ring-secondary/20 focus:outline-none transition-all shadow-inner disabled:opacity-40"
               aria-label={`Digit ${i + 1}`}
             />
           ))}

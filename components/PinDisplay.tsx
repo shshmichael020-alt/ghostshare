@@ -27,7 +27,7 @@ export default function PinDisplay({ code, onCopy }: PinDisplayProps) {
   }
 
   return (
-    <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-surface-container-lowest p-4 sm:p-5 rounded-xl border border-white/[0.08] shadow-inner w-full">
+    <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-surface-container-lowest p-4 sm:p-5 rounded-xl border border-border-default shadow-inner w-full transition-colors duration-200">
       {/* 8-Digit Segmented Code Display */}
       <div className="flex items-center gap-3 select-all">
         <span className="font-mono-pairing-code text-on-surface tracking-widest drop-shadow-sm">

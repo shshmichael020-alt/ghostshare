@@ -122,7 +122,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
         {/* Hero Context */}
         <div className="text-center max-w-lg mb-8">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-container-high text-primary font-label-caps tracking-widest uppercase mb-3 border border-white/[0.06]">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-container-high text-primary font-label-caps tracking-widest uppercase mb-3 border border-border-default">
             <Sparkles size={14} />
             <span>WebRTC Direct P2P Tunnel</span>
           </div>
@@ -136,14 +136,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
         </div>
 
         {/* Connection Card */}
-        <div className="w-full max-w-xl bg-surface-container rounded-2xl border border-white/[0.08] shadow-2xl p-6 sm:p-8 relative overflow-hidden flex flex-col gap-6">
+        <div className="w-full max-w-xl bg-surface-container rounded-2xl border border-border-default shadow-2xl p-6 sm:p-8 relative overflow-hidden flex flex-col gap-6 transition-colors duration-200">
           <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-primary to-transparent opacity-60" />
 
           {/* Mode Switcher Tabs */}
-          <div className="flex items-center justify-between gap-2 bg-surface-container-lowest p-1 rounded-xl border border-white/[0.06]">
+          <div className="flex items-center justify-between gap-2 bg-surface-container-lowest p-1 rounded-xl border border-border-default">
             <button
               type="button"
-              className="flex-1 py-2 px-3 rounded-lg font-body-sm font-medium transition-all flex items-center justify-center gap-2 bg-surface-container-high text-on-surface shadow-sm border border-white/[0.04]"
+              className="flex-1 py-2 px-3 rounded-lg font-body-sm font-medium transition-all flex items-center justify-center gap-2 bg-surface-container-highest text-on-surface shadow-sm border border-border-subtle"
             >
               <span className="w-2 h-2 rounded-full bg-secondary" />
               <span>8-Digit Token</span>
@@ -159,12 +159,13 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           </div>
 
           {/* Instruction banner */}
-          <div className="p-3.5 rounded-xl bg-surface-container-high border border-white/[0.06] flex items-start gap-2.5 text-xs sm:text-sm font-body-sm text-on-surface-variant">
+          <div className="p-3.5 rounded-xl bg-surface-container-high border border-border-default flex items-start gap-2.5 text-xs sm:text-sm font-body-sm text-on-surface-variant">
             <Radio size={16} className="text-secondary shrink-0 mt-0.5" />
             <div>
               <span className="font-semibold text-on-surface">Step 1:</span> Open GhostShare on the other device and stay on <span className="text-secondary font-medium">Receive Files</span>.
               <br />
-              <span className="font-semibold text-on-surface">Step 2:</span> Enter that device&apos;s 8-digit code below to establish the direct bridge.
+              <span className="font-semibold text-on-surface">Step 2:</span>{" "}
+              Enter that device&apos;s 8-digit code below to establish the direct bridge.
             </div>
           </div>
 
@@ -217,7 +218,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                   disconnectSession();
                   setChecking(false);
                 }}
-                className="py-3 px-4 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-sm font-body-sm transition-colors cursor-pointer border border-white/[0.08]"
+                className="py-3 px-4 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-sm font-body-sm transition-colors cursor-pointer border border-border-default"
               >
                 Cancel
               </button>
@@ -226,14 +227,14 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             <button
               type="button"
               onClick={() => setIsScannerOpen(true)}
-              className="py-3 px-4 rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface font-body-md font-medium transition-all flex items-center justify-center gap-2 border border-white/[0.08] cursor-pointer"
+              className="py-3 px-4 rounded-xl bg-surface-container-high hover:bg-surface-bright text-on-surface font-body-md font-medium transition-all flex items-center justify-center gap-2 border border-border-default cursor-pointer"
             >
               <QrCode size={18} className="text-secondary" />
               <span>Scan QR</span>
             </button>
           </div>
 
-          <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-on-surface-variant font-mono-telemetry">
+          <div className="pt-2 border-t border-border-subtle flex items-center justify-between text-on-surface-variant font-mono-telemetry">
             <span>PAIRING PROTOCOL: WebRTC / SCTP</span>
             <span className="text-tertiary">ZERO-KNOWLEDGE P2P</span>
           </div>
@@ -252,18 +253,18 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
   return (
     <div className="w-full flex flex-col gap-6">
       {/* Top Telemetry & Session Header */}
-      <section className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-surface-container-low border border-white/[0.08] shadow-sm">
+      <section className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-surface-container-low border border-border-default shadow-sm transition-colors duration-200">
         <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={disconnectSession}
-            className="flex items-center gap-1.5 text-xs font-body-sm text-on-surface-variant hover:text-on-surface bg-surface-container px-2.5 py-1.5 rounded-lg border border-white/[0.04] transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 text-xs font-body-sm text-on-surface-variant hover:text-on-surface bg-surface-container px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors cursor-pointer"
             title="Disconnect and change code"
           >
             <ArrowLeft size={14} />
             <span>Change Code</span>
           </button>
 
-          <div className="flex items-center gap-2 bg-surface-container-highest px-3 py-1 rounded-lg border border-white/[0.06]">
+          <div className="flex items-center gap-2 bg-surface-container-highest px-3 py-1 rounded-lg border border-border-default">
             <span className="font-label-caps text-on-surface-variant uppercase">Pairing Channel</span>
             <div className="flex items-center gap-1 text-secondary font-mono-telemetry font-bold tracking-wider">
               <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
@@ -273,13 +274,13 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-container-high text-on-surface">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-container-high text-on-surface border border-border-subtle">
             <span
               className={`w-2 h-2 rounded-full ${
                 isRemoteSuspended
-                  ? "bg-amber-400 animate-pulse"
+                  ? "bg-warning animate-pulse"
                   : candidatePair?.pathType === "turn-relay"
-                  ? "bg-amber-400"
+                  ? "bg-warning"
                   : "bg-tertiary"
               }`}
             />
@@ -295,7 +296,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
         <div className="flex items-center gap-4 font-mono-telemetry text-on-surface-variant">
           {candidatePair?.currentRoundTripTime !== undefined && (
-            <div className="flex items-center gap-1.5 bg-surface-container px-2 py-0.5 rounded border border-white/[0.04] text-[11px]">
+            <div className="flex items-center gap-1.5 bg-surface-container px-2 py-0.5 rounded border border-border-subtle text-[11px]">
               <span className="text-on-surface-variant uppercase">RTT</span>
               <span className="text-secondary font-mono-data font-bold">
                 {Math.round(candidatePair.currentRoundTripTime * 1000)}ms
@@ -308,10 +309,10 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
           </div>
           <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs ${
             candidatePair?.pathType === "turn-relay"
-              ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+              ? "bg-warning-container text-warning border-warning-border"
               : candidatePair?.pathType === "host-to-host"
-              ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-              : "bg-surface-container text-primary border-white/[0.04]"
+              ? "bg-success-container text-success border-success-border"
+              : "bg-surface-container text-primary border-border-subtle"
           }`}>
             <Radio size={14} />
             <span>{candidatePair?.pathLabel || "STUN Traversal Active"}</span>
@@ -320,7 +321,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
       </section>
 
       {candidatePair?.pathType === "turn-relay" && (
-        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs font-mono-telemetry flex items-center justify-between gap-3">
+        <div className="p-3.5 rounded-xl bg-warning-container border border-warning-border text-warning text-xs font-mono-telemetry flex items-center justify-between gap-3">
           <span>⚠️ Connected via Encrypted TURN Relay. If devices are on the same Wi-Fi, router AP/Client Isolation or NAT loopback restriction may be blocking direct LAN discovery.</span>
         </div>
       )}
@@ -346,11 +347,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             onClick={openFilePicker}
             className={`relative group cursor-pointer transition-all duration-300 rounded-2xl p-8 sm:p-10 flex flex-col items-center justify-center text-center border-2 border-dashed ${
               dragOver
-                ? "border-secondary bg-secondary/5 shadow-[0_0_30px_rgba(76,215,246,0.15)]"
-                : "border-white/[0.12] bg-surface-container-low hover:bg-surface-container hover:border-white/[0.2] shadow-md"
+                ? "border-secondary bg-secondary/5 shadow-lg ring-4 ring-secondary/15"
+                : "border-border-strong bg-surface-container-low hover:bg-surface-container hover:border-secondary/60 shadow-md"
             }`}
           >
-            <div className="w-14 h-14 rounded-2xl bg-surface-container-highest border border-white/[0.06] flex items-center justify-center mb-4 shadow-inner group-hover:scale-105 transition-transform text-secondary">
+            <div className="w-14 h-14 rounded-2xl bg-surface-container-highest border border-border-default flex items-center justify-center mb-4 shadow-inner group-hover:scale-105 transition-transform text-secondary">
               <CloudUpload size={28} />
             </div>
             <h2 className="font-headline-md text-on-surface mb-1">
@@ -358,11 +359,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
             </h2>
             <p className="font-body-md text-on-surface-variant max-w-lg mb-4">
               Drag files here, browse device, or paste (
-              <kbd className="px-1.5 py-0.5 bg-surface-container-highest text-on-surface rounded font-mono-telemetry border border-white/[0.06]">
+              <kbd className="px-1.5 py-0.5 bg-surface-container-highest text-on-surface rounded font-mono-telemetry border border-border-default">
                 Ctrl+V
               </kbd>{" "}
               /{" "}
-              <kbd className="px-1.5 py-0.5 bg-surface-container-highest text-on-surface rounded font-mono-telemetry border border-white/[0.06]">
+              <kbd className="px-1.5 py-0.5 bg-surface-container-highest text-on-surface rounded font-mono-telemetry border border-border-default">
                 ⌘+V
               </kbd>
               ) screenshots directly.
@@ -374,12 +375,12 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                   e.stopPropagation();
                   openFilePicker();
                 }}
-                className="px-4 py-2 rounded-lg bg-surface-container-highest text-on-surface hover:bg-primary hover:text-on-primary transition-all font-medium flex items-center gap-2 shadow-sm border border-white/[0.06]"
+                className="px-4 py-2 rounded-lg bg-surface-container-highest text-on-surface hover:bg-primary hover:text-on-primary transition-all font-medium flex items-center gap-2 shadow-sm border border-border-default"
               >
                 <FolderOpen size={16} />
                 <span>Select from Disk</span>
               </button>
-              <span className="text-outline-variant font-mono-telemetry">
+              <span className="text-on-surface-variant font-mono-telemetry">
                 Direct Browser-to-Browser Transfer
               </span>
             </div>
@@ -400,7 +401,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
           {/* Staged Queue Manifest */}
           {stagedFiles.length > 0 && (
-            <div className="rounded-2xl bg-surface-container-low p-5 sm:p-6 border border-white/[0.08] flex flex-col gap-4 shadow-sm">
+            <div className="rounded-2xl bg-surface-container-low p-5 sm:p-6 border border-border-default flex flex-col gap-4 shadow-sm transition-colors duration-200">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="font-headline-md text-on-surface">Payload Queue</span>
@@ -424,11 +425,11 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 {stagedFiles.map((item) => (
                   <div
                     key={item.id}
-                    className="flex flex-col gap-2 p-3.5 rounded-xl bg-surface-container border border-white/[0.04] transition-all hover:bg-surface-container-high"
+                    className="flex flex-col gap-2 p-3.5 rounded-xl bg-surface-container border border-border-subtle transition-all hover:bg-surface-container-high"
                   >
                     <div className="flex items-center justify-between gap-3 min-w-0">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-lg bg-surface-container-highest border border-white/[0.06] flex items-center justify-center shrink-0">
+                        <div className="w-10 h-10 rounded-lg bg-surface-container-highest border border-border-default flex items-center justify-center shrink-0">
                           <FileTypeIcon filename={item.name} size={20} />
                         </div>
                         <div className="flex flex-col min-w-0">
@@ -519,7 +520,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
 
         {/* Right: Transfer Controls & System Specs (4 cols) */}
         <div className="lg:col-span-4 flex flex-col gap-5">
-          <div className="rounded-2xl bg-surface-container-low p-6 border border-white/[0.08] shadow-xl flex flex-col gap-5">
+          <div className="rounded-2xl bg-surface-container-low p-6 border border-border-default shadow-xl flex flex-col gap-5 transition-colors duration-200">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
                 <Layers size={20} />
@@ -532,7 +533,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 py-2 border-y border-white/[0.06] font-body-sm text-on-surface-variant">
+            <div className="flex flex-col gap-3 py-2 border-y border-border-default font-body-sm text-on-surface-variant">
               <div className="flex justify-between items-center">
                 <span>Total Staged Size:</span>
                 <span className="font-mono-data text-on-surface font-medium">
@@ -548,7 +549,7 @@ export default function SendPanel({ initialCode }: { initialCode?: string }) {
                 <span className="font-mono-telemetry text-tertiary">SCTP Chunk Streaming</span>
               </div>
               {lastTransferSummary && (
-                <div className="flex justify-between items-center text-emerald-300">
+                <div className="flex justify-between items-center text-success">
                   <span>Last Speed:</span>
                   <span className="font-mono-data font-bold">
                     {lastTransferSummary.effectiveThroughputMbs.toFixed(2)} MB/s

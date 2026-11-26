@@ -130,15 +130,15 @@ export default function QrScannerModal({ isOpen, onClose, onScanSuccess }: QrSca
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-backdrop backdrop-blur-md">
       <div
-        className="w-full max-w-md bg-surface-container rounded-2xl border border-white/[0.1] shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-md bg-surface-container rounded-2xl border border-border-default shadow-2xl overflow-hidden flex flex-col transition-colors duration-200"
         role="dialog"
         aria-modal="true"
         aria-labelledby="qr-scanner-title"
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-white/[0.08] bg-surface-container-high/60">
+        <div className="flex items-center justify-between p-4 border-b border-border-default bg-surface-container-high/60">
           <div className="flex items-center gap-2">
             <Camera size={18} className="text-secondary" />
             <h2 id="qr-scanner-title" className="font-headline-md text-on-surface">
@@ -156,7 +156,7 @@ export default function QrScannerModal({ isOpen, onClose, onScanSuccess }: QrSca
 
         {/* Video feed viewport */}
         <div className="p-6 flex flex-col items-center justify-center gap-4">
-          <div className="relative w-full max-w-[280px] aspect-square rounded-xl overflow-hidden bg-black border border-white/[0.1] shadow-inner flex items-center justify-center">
+          <div className="relative w-full max-w-[280px] aspect-square rounded-xl overflow-hidden bg-black border border-border-default shadow-inner flex items-center justify-center">
             <div id="qr-scanner-element" ref={scannerRef} className="w-full h-full" />
             {initializing && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-surface-container-lowest/90 text-on-surface-variant font-mono-telemetry">
@@ -179,7 +179,7 @@ export default function QrScannerModal({ isOpen, onClose, onScanSuccess }: QrSca
 
           <button
             onClick={onClose}
-            className="w-full py-2.5 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors cursor-pointer border border-white/[0.08]"
+            className="w-full py-2.5 rounded-lg bg-surface-container-highest hover:bg-surface-bright text-on-surface font-body-sm font-medium transition-colors cursor-pointer border border-border-default"
           >
             Switch to Manual Code Entry
           </button>

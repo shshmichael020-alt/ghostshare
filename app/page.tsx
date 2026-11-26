@@ -30,7 +30,7 @@ function GhostShareContent({ initialCode }: { initialCode?: string }) {
   };
 
   return (
-    <div className="min-h-screen flex flex-col justify-between bg-surface selection:bg-primary-container selection:text-on-primary-container relative overflow-x-hidden">
+    <div className="min-h-screen flex flex-col justify-between bg-surface transition-colors duration-200 selection:bg-primary-container selection:text-on-primary-container relative overflow-x-hidden">
       {/* Brand Header */}
       <Header
         mode={mode}
@@ -62,7 +62,7 @@ function GhostShareContent({ initialCode }: { initialCode?: string }) {
       <EphemeralChat />
 
       {/* Footer */}
-      <footer className="w-full border-t border-white/[0.06] bg-surface-container-lowest/80 py-6 text-on-surface-variant font-body-sm">
+      <footer className="w-full border-t border-border-default bg-surface-container-lowest/80 py-6 text-on-surface-variant font-body-sm transition-colors duration-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-4 text-xs font-mono-telemetry">
             <span className="flex items-center gap-1.5 text-on-surface">

@@ -68,10 +68,10 @@ export default function EphemeralChat() {
         <div
           role="dialog"
           aria-label="Ephemeral Live Chat"
-          className="w-[calc(100vw-2.5rem)] sm:w-96 h-[460px] max-h-[80vh] mb-3 flex flex-col bg-surface-container-high/95 backdrop-blur-2xl border border-white/[0.1] rounded-2xl shadow-[0_16px_48px_rgba(0,0,0,0.6)] overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200"
+          className="w-[calc(100vw-2.5rem)] sm:w-96 h-[460px] max-h-[80vh] mb-3 flex flex-col bg-surface-container-high/95 backdrop-blur-2xl border border-border-default rounded-2xl shadow-chat overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200 transition-colors"
         >
           {/* Header */}
-          <div className="px-4 py-3 bg-surface-container-highest/90 border-b border-white/[0.08] flex items-center justify-between">
+          <div className="px-4 py-3 bg-surface-container-highest/90 border-b border-border-default flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center text-primary">
                 <MessageSquare size={15} />
@@ -92,7 +92,7 @@ export default function EphemeralChat() {
 
             <button
               onClick={() => setIsChatOpen(false)}
-              className="p-1.5 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-white/[0.06] transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-hover transition-colors cursor-pointer"
               title="Close Chat"
               aria-label="Close live chat"
             >
@@ -133,7 +133,7 @@ export default function EphemeralChat() {
                       className={`max-w-[85%] px-3.5 py-2 text-xs rounded-2xl break-words leading-relaxed ${
                         isMe
                           ? "bg-primary text-on-primary rounded-tr-xs shadow-sm font-medium"
-                          : "bg-surface-container-highest text-on-surface border border-white/[0.08] rounded-tl-xs"
+                          : "bg-surface-container-highest text-on-surface border border-border-default rounded-tl-xs"
                       }`}
                     >
                       {msg.text}
@@ -146,7 +146,7 @@ export default function EphemeralChat() {
           </div>
 
           {/* Notice & Input Footer */}
-          <div className="p-3 bg-surface-container-lowest/80 border-t border-white/[0.06]">
+          <div className="p-3 bg-surface-container-lowest/80 border-t border-border-default">
             <form onSubmit={handleSend} className="flex items-center gap-2">
               <div className="relative flex-1">
                 <input
@@ -162,7 +162,7 @@ export default function EphemeralChat() {
                   }
                   disabled={connStatus !== "connected"}
                   maxLength={MAX_CHARS}
-                  className="w-full bg-surface-container-low border border-white/[0.08] rounded-xl px-3.5 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none focus:border-primary/50 transition-colors disabled:opacity-50 pr-12"
+                  className="w-full bg-surface-container-low border border-border-default rounded-xl px-3.5 py-2 text-xs text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none focus:border-primary/50 transition-colors disabled:opacity-50 pr-12"
                 />
                 <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-mono-telemetry text-on-surface-variant/50">
                   {inputText.length}/{MAX_CHARS}
@@ -187,7 +187,7 @@ export default function EphemeralChat() {
       <button
         onClick={toggleChat}
         aria-label="Toggle live chat"
-        className="relative group flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-surface-container-highest/90 hover:bg-surface-container-high backdrop-blur-xl border border-white/[0.12] text-on-surface shadow-[0_8px_24px_rgba(0,0,0,0.4)] transition-all duration-200 cursor-pointer active:scale-95"
+        className="relative group flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-surface-container-highest/90 hover:bg-surface-container-high backdrop-blur-xl border border-border-strong text-on-surface shadow-floating transition-all duration-200 cursor-pointer active:scale-95"
       >
         <div className="relative">
           <MessageSquare size={18} className="text-primary group-hover:scale-110 transition-transform" />

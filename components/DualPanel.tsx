@@ -169,7 +169,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
       <div className="w-full max-w-4xl mx-auto space-y-8 animate-in fade-in duration-300">
         {/* Banner */}
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-high border border-white/[0.08] text-xs font-mono-telemetry text-secondary mb-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-container-high border border-border-default text-xs font-mono-telemetry text-secondary mb-2">
             <ArrowLeftRight size={14} />
             Simultaneous Bidirectional WebRTC P2P
           </div>
@@ -191,7 +191,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
         {/* Pairing cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Card 1: Host a Session */}
-          <div className="p-6 rounded-2xl bg-surface-container-low border border-white/[0.08] flex flex-col justify-between hover:border-white/[0.15] transition-all">
+          <div className="p-6 rounded-2xl bg-surface-container-low border border-border-default flex flex-col justify-between hover:border-border-strong transition-all shadow-sm">
             <div className="space-y-4">
               <div className="w-10 h-10 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-primary">
                 <Radio size={20} />
@@ -226,7 +226,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
           </div>
 
           {/* Card 2: Join an Existing Session */}
-          <div className="p-6 rounded-2xl bg-surface-container-low border border-white/[0.08] flex flex-col justify-between hover:border-white/[0.15] transition-all">
+          <div className="p-6 rounded-2xl bg-surface-container-low border border-border-default flex flex-col justify-between hover:border-border-strong transition-all shadow-sm">
             <div className="space-y-4">
               <div className="w-10 h-10 rounded-xl bg-secondary/20 border border-secondary/30 flex items-center justify-center text-secondary">
                 <QrCode size={20} />
@@ -253,7 +253,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
             <div className="mt-6 flex items-center gap-3">
               <button
                 onClick={() => setIsScannerOpen(true)}
-                className="py-3 px-3.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-white/[0.08] text-xs font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                className="py-3 px-3.5 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-border-default text-xs font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer"
                 title="Scan QR Code"
               >
                 <QrCode size={16} className="text-secondary" />
@@ -263,7 +263,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               <button
                 onClick={() => onJoinSubmit(inputCode)}
                 disabled={isJoining || inputCode.length !== 8}
-                className="flex-1 py-3 px-4 rounded-xl bg-surface-container-highest hover:bg-white/[0.1] text-on-surface font-medium text-xs sm:text-sm border border-white/[0.1] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40"
+                className="flex-1 py-3 px-4 rounded-xl bg-surface-container-highest hover:bg-surface-bright text-on-surface font-medium text-xs sm:text-sm border border-border-default transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40"
               >
                 {isJoining ? (
                   <>
@@ -300,7 +300,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
   if ((connStatus === "connecting" || connStatus === "reconnecting") && role === "joiner") {
     return (
       <div className="w-full max-w-md mx-auto space-y-6 animate-in fade-in duration-300">
-        <div className="p-6 sm:p-8 rounded-3xl bg-surface-container-low border border-white/[0.08] shadow-xl text-center space-y-6">
+        <div className="p-6 sm:p-8 rounded-3xl bg-surface-container-low border border-border-default shadow-xl text-center space-y-6 transition-colors duration-200">
           <div className="w-16 h-16 rounded-2xl bg-secondary/15 border border-secondary/25 flex items-center justify-center mx-auto text-secondary">
             <Loader2 size={32} className="animate-spin" />
           </div>
@@ -316,7 +316,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
           <div className="pt-2">
             <button
               onClick={disconnectSession}
-              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-xs font-medium transition-colors cursor-pointer border border-white/[0.08]"
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-error-container/30 text-on-surface-variant hover:text-error text-xs font-medium transition-colors cursor-pointer border border-border-default"
             >
               Cancel Connection
             </button>
@@ -330,7 +330,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
   if (connStatus === "awaiting" || connStatus === "connecting" || connStatus === "reconnecting") {
     return (
       <div className="w-full max-w-2xl mx-auto space-y-6 animate-in fade-in duration-300">
-        <div className="p-6 sm:p-8 rounded-3xl bg-surface-container-low border border-white/[0.08] shadow-xl text-center space-y-6">
+        <div className="p-6 sm:p-8 rounded-3xl bg-surface-container-low border border-border-default shadow-xl text-center space-y-6 transition-colors duration-200">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-secondary/15 text-secondary border border-secondary/25 text-xs font-mono-telemetry">
               <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
@@ -353,7 +353,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
           {/* QR Code */}
           {code && (
-            <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl w-48 h-48 mx-auto shadow-inner">
+            <div className="flex flex-col items-center justify-center p-4 bg-white rounded-2xl border border-border-default w-48 h-48 mx-auto shadow-inner">
               <QRCodeSVG
                 value={`${typeof window !== "undefined" ? window.location.origin : ""}?code=${code}&mode=dual`}
                 size={160}
@@ -366,14 +366,14 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               onClick={copyLink}
-              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-white/[0.08] text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-border-default text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
             >
               {copiedLink ? <Check size={14} className="text-tertiary" /> : <Copy size={14} />}
               {copiedLink ? "Link Copied!" : "Copy Link"}
             </button>
             <button
               onClick={shareLink}
-              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-white/[0.08] text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-border-default text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
             >
               <Share2 size={14} />
               Share Link
@@ -382,7 +382,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
           {/* Countdown & Expiry Selector */}
           {remainingTtl !== null && (
-            <div className="pt-4 border-t border-white/[0.06] flex flex-wrap items-center justify-between text-xs text-on-surface-variant">
+            <div className="pt-4 border-t border-border-default flex flex-wrap items-center justify-between text-xs text-on-surface-variant">
               <div className="flex items-center gap-1.5 font-mono-telemetry">
                 <Clock size={14} className="text-primary" />
                 <span>Expires in:</span>
@@ -397,7 +397,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                   <select
                     value={initialTtl}
                     onChange={(e) => updateExpiryWindow(Number(e.target.value))}
-                    className="bg-surface-container-high border border-white/[0.08] rounded-lg px-2 py-1 text-xs text-on-surface focus:outline-none cursor-pointer"
+                    className="bg-surface-container-high border border-border-default rounded-lg px-2 py-1 text-xs text-on-surface focus:outline-none cursor-pointer"
                   >
                     {EXPIRY_OPTIONS.map((opt) => (
                       <option key={opt.seconds} value={opt.seconds}>
@@ -414,7 +414,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
             <button
               type="button"
               onClick={disconnectSession}
-              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-white/[0.08] text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
+              className="px-4 py-2 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface border border-border-default text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
             >
               <ArrowLeftRight size={14} className="text-secondary" />
               <span>Join a Peer Instead</span>
@@ -436,11 +436,11 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
   return (
     <div className="w-full max-w-6xl mx-auto space-y-6 animate-in fade-in duration-300">
       {/* Active Session Status Bar */}
-      <div className="p-4 rounded-2xl bg-surface-container-low border border-white/[0.08] flex flex-wrap items-center justify-between gap-4 shadow-sm">
+      <div className="p-4 rounded-2xl bg-surface-container-low border border-border-default flex flex-wrap items-center justify-between gap-4 shadow-sm transition-colors duration-200">
         <div className="flex items-center gap-3">
           <div
             className={`w-3 h-3 rounded-full animate-pulse ${
-              isRemoteSuspended ? "bg-amber-400" : "bg-tertiary"
+              isRemoteSuspended ? "bg-warning" : "bg-tertiary"
             }`}
           />
           <div>
@@ -448,16 +448,16 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               <span className="text-xs font-semibold text-on-surface">
                 {isRemoteSuspended ? "Peer is selecting files..." : "Dual P2P Tunnel Active"}
               </span>
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-on-surface-variant uppercase border border-white/[0.06]">
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono-telemetry bg-surface-container-high text-on-surface-variant uppercase border border-border-default">
                 Code: {code}
               </span>
               {candidatePair && (
                 <span className={`px-2 py-0.5 rounded text-[10px] font-mono-telemetry border ${
                   candidatePair.pathType === "turn-relay"
-                    ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+                    ? "bg-warning-container text-warning border-warning-border"
                     : candidatePair.pathType === "host-to-host"
-                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                    : "bg-surface-container-high text-secondary border-white/[0.06]"
+                    ? "bg-success-container text-success border-success-border"
+                    : "bg-surface-container-high text-secondary border-border-default"
                 }`}>
                   {candidatePair.pathLabel || (candidatePair.isRelayed ? "TURN Relay" : `Direct (${candidatePair.localCandidateType})`)}
                 </span>
@@ -471,7 +471,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
         <div className="flex items-center gap-3">
           {remainingTtl !== null && (
-            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-surface-container-high border border-white/[0.06] text-xs font-mono-telemetry">
+            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-surface-container-high border border-border-default text-xs font-mono-telemetry">
               <Clock size={13} className="text-primary" />
               <span>TTL: {formatCountdown(remainingTtl)}</span>
             </div>
@@ -479,7 +479,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
           <button
             onClick={disconnectSession}
-            className="px-3 py-1.5 rounded-xl bg-surface-container-high hover:bg-error/20 hover:text-error text-on-surface-variant border border-white/[0.08] text-xs font-medium transition-colors cursor-pointer"
+            className="px-3 py-1.5 rounded-xl bg-surface-container-high hover:bg-error/20 hover:text-error text-on-surface-variant border border-border-default text-xs font-medium transition-colors cursor-pointer"
           >
             End Session
           </button>
@@ -487,7 +487,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
       </div>
 
       {natWarning && (
-        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs flex items-center gap-2.5">
+        <div className="p-3.5 rounded-xl bg-warning-container border border-warning-border text-warning text-xs flex items-center gap-2.5">
           <AlertCircle size={16} className="shrink-0" />
           <span>{natWarning}</span>
         </div>
@@ -498,8 +498,8 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
         {/* ======================================================== */}
         {/* COLUMN 1: OUTBOUND TRANSFERS (SEND)                     */}
         {/* ======================================================== */}
-        <div className="p-5 sm:p-6 rounded-3xl bg-surface-container-low border border-white/[0.08] flex flex-col space-y-5 shadow-lg">
-          <div className="flex items-center justify-between pb-3 border-b border-white/[0.06]">
+        <div className="p-5 sm:p-6 rounded-3xl bg-surface-container-low border border-border-default flex flex-col space-y-5 shadow-lg transition-colors duration-200">
+          <div className="flex items-center justify-between pb-3 border-b border-border-default">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-primary">
                 <Upload size={16} />
@@ -534,7 +534,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
             className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[140px] ${
               dragOver
                 ? "border-primary bg-primary/10"
-                : "border-white/[0.1] hover:border-white/[0.2] bg-surface-container-lowest/50"
+                : "border-border-strong hover:border-primary/60 bg-surface-container-lowest/50"
             }`}
           >
             <input
@@ -569,7 +569,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               {stagedFiles.map((item) => (
                 <div
                   key={item.id}
-                  className="p-3 rounded-xl bg-surface-container-high/60 border border-white/[0.06] flex items-center justify-between gap-3 text-xs"
+                  className="p-3 rounded-xl bg-surface-container-high/60 border border-border-default flex items-center justify-between gap-3 text-xs"
                 >
                   <div className="flex items-center gap-2.5 min-w-0 flex-1">
                     <FileTypeIcon filename={item.name} />
@@ -597,7 +597,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
                   <div className="flex items-center gap-2 shrink-0">
                     {item.status === "uploading" && (
-                      <div className="w-16 bg-surface-container-lowest rounded-full h-1.5 overflow-hidden border border-white/[0.05]">
+                      <div className="w-16 bg-surface-container-lowest rounded-full h-1.5 overflow-hidden border border-border-subtle">
                         <div
                           className="bg-primary h-full transition-all duration-150"
                           style={{ width: `${item.progress}%` }}
@@ -673,8 +673,8 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
         {/* ======================================================== */}
         {/* COLUMN 2: INBOUND TRANSFERS (RECEIVE)                    */}
         {/* ======================================================== */}
-        <div className="p-5 sm:p-6 rounded-3xl bg-surface-container-low border border-white/[0.08] flex flex-col space-y-5 shadow-lg">
-          <div className="flex items-center justify-between pb-3 border-b border-white/[0.06]">
+        <div className="p-5 sm:p-6 rounded-3xl bg-surface-container-low border border-border-default flex flex-col space-y-5 shadow-lg transition-colors duration-200">
+          <div className="flex items-center justify-between pb-3 border-b border-border-default">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-secondary/20 border border-secondary/30 flex items-center justify-center text-secondary">
                 <Download size={16} />
@@ -722,7 +722,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                       return (
                         <div
                           key={f.id}
-                          className="p-1.5 rounded-lg bg-surface-container/60 border border-white/[0.03] flex items-center justify-between text-[11px]"
+                          className="p-1.5 rounded-lg bg-surface-container/60 border border-border-subtle flex items-center justify-between text-[11px]"
                         >
                           <div className="truncate mr-2 min-w-0">
                             <span className="text-on-surface font-medium truncate block">{f.name}</span>
@@ -747,8 +747,8 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                                 onClick={() => selectDestinationForFile(f.id)}
                                 className={`px-2 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 cursor-pointer transition-colors border ${
                                   isRam && isLarge
-                                    ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 animate-pulse"
-                                    : "bg-surface-container-highest hover:bg-white/[0.12] text-on-surface border-white/[0.06]"
+                                    ? "bg-warning-container text-warning border-warning-border hover:bg-warning-container animate-pulse"
+                                    : "bg-surface-container-highest hover:bg-surface-hover text-on-surface border-border-default"
                                 }`}
                                 title="Select destination file on disk"
                               >
@@ -778,7 +778,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                   )}
 
                   {!storageCapability?.isOpfsSupported && pendingApproval.files.some((f) => f.size > 100 * 1024 * 1024) && (
-                    <p className="text-[10px] text-amber-300 font-medium mt-1">
+                    <p className="text-[10px] text-warning font-medium mt-1">
                       ⚠️ Files &gt; 100 MB require OPFS or destination file selection.
                     </p>
                   )}
@@ -791,7 +791,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                   !selectedDestinations?.[pendingApproval.files[0].id] && (
                     <button
                       onClick={() => handleAcceptWithUserFile && handleAcceptWithUserFile(pendingApproval.files[0].id)}
-                      className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-white/[0.12] text-on-surface text-xs font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                      className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-surface-hover text-on-surface text-xs font-medium transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-border-subtle"
                       title="Select destination file on disk and accept"
                     >
                       <HardDrive size={13} className="text-secondary" /> Save To File &amp; Accept
@@ -805,7 +805,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                 </button>
                 <button
                   onClick={handleDeclineTransfer}
-                  className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-white/[0.08] text-on-surface-variant hover:text-on-surface transition-colors text-xs cursor-pointer font-medium"
+                  className="py-2 px-3 rounded-xl bg-surface-container-high hover:bg-surface-hover text-on-surface-variant hover:text-on-surface transition-colors text-xs cursor-pointer font-medium border border-border-subtle"
                 >
                   Decline
                 </button>
@@ -815,7 +815,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
           {/* Active Receiving Progress Bar */}
           {activeReceiving && (
-            <div className="p-3.5 rounded-xl bg-surface-container-high/80 border border-white/[0.08] space-y-2 animate-in fade-in">
+            <div className="p-3.5 rounded-xl bg-surface-container-high/80 border border-border-default space-y-2 animate-in fade-in">
               <div className="flex items-center justify-between text-xs">
                 <span className="truncate font-medium text-on-surface flex items-center gap-1.5">
                   <Loader2 size={13} className="animate-spin text-secondary" />
@@ -828,7 +828,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
                   {transferSpeed && ` • ${transferSpeed.formattedSpeed}`}
                 </span>
               </div>
-              <div className="w-full bg-surface-container-lowest rounded-full h-1.5 overflow-hidden border border-white/[0.05]">
+              <div className="w-full bg-surface-container-lowest rounded-full h-1.5 overflow-hidden border border-border-subtle">
                 <div
                   className="bg-secondary h-full transition-all duration-150"
                   style={{
@@ -844,7 +844,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
 
           {/* Received Files List */}
           {receivedFiles.length === 0 ? (
-            <div className="flex-1 min-h-[160px] flex flex-col items-center justify-center p-6 text-center text-on-surface-variant border border-dashed border-white/[0.08] rounded-2xl bg-surface-container-lowest/30">
+            <div className="flex-1 min-h-[160px] flex flex-col items-center justify-center p-6 text-center text-on-surface-variant border border-dashed border-border-default rounded-2xl bg-surface-container-lowest/30">
               <FileCheck size={28} className="text-on-surface-variant/50 mb-2" />
               <p className="text-xs font-medium text-on-surface">No received files yet</p>
               <p className="text-[11px] mt-1 max-w-xs">
@@ -864,7 +864,7 @@ export default function DualPanel({ initialCode }: { initialCode?: string } = {}
               {receivedFiles.map((file) => (
                 <div
                   key={file.id}
-                  className="p-3 rounded-xl bg-surface-container-high/60 border border-white/[0.06] flex items-center justify-between gap-3 text-xs"
+                  className="p-3 rounded-xl bg-surface-container-high/60 border border-border-default flex items-center justify-between gap-3 text-xs"
                 >
                   <div className="flex items-center gap-2.5 min-w-0 flex-1">
                     <FileTypeIcon filename={file.name} />

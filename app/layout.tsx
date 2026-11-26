@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, JetBrains_Mono } from "next/font/google";
+import { THEME_INIT_SCRIPT } from "@/lib/themeConstants";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -45,8 +46,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`dark ${geistSans.variable} ${jetbrainsMono.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-canvas-default text-on-surface">
+    <html lang="en" suppressHydrationWarning className={`dark ${geistSans.variable} ${jetbrainsMono.variable} h-full antialiased`}>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
+      <body className="min-h-full flex flex-col bg-canvas-default text-on-surface transition-colors duration-200">
         {children}
       </body>
     </html>

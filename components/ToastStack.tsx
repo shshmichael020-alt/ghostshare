@@ -25,7 +25,7 @@ export default function ToastStack({ toasts, onDismiss }: ToastStackProps) {
                 ? "bg-surface-container-high/95 border-error/30 text-error"
                 : isSuccess
                 ? "bg-surface-container-high/95 border-tertiary/30 text-on-surface"
-                : "bg-surface-container-high/95 border-white/[0.1] text-on-surface"
+                : "bg-surface-container-high/95 border-border-default text-on-surface"
             }`}
           >
             <div className="flex items-center gap-2.5 min-w-0 flex-1">
